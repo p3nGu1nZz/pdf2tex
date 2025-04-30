@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "pip"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdf2tex"
+version = "0.1.0"
+description = "Easily convert PDF files to LaTeX with OCR."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [
+    {name = "Rawson K.", email = "backrqqms@gmail.com"},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "click>=8.1.8",
+    "easyocr>=1.7.2",
+    "matplotlib>=3.10.1",
+    "numpy>=2.2.5",
+    "opencv-python>=4.11.0.86",
+    "pdf2image>=1.17.0",
+    "pymupdf>=1.25.5",
+    "rich>=14.0.0",
+    "torch>=2.7.0",
+    "torchvision>=0.22.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=25.1.0",
+    "build>=1.2.2.post1",
+    "isort>=6.0.1",
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.26.0",
+    "pytest-cov>=6.1.1",
+    "ruff>=0.11.6",
+    "twine>=6.1.0",
+]
+
+[project.scripts]
+pdf2tex = "pdf2tex.pdf2tex:main"
+
+[project.urls]
+"Homepage" = "https://github.com/p3nGu1nZz/pdf2tex"
+"Bug Tracker" = "https://github.com/p3nGu1nZz/pdf2tex/issues"
+
+[tool.setuptools]
+packages = ["pdf2tex"]
+package-dir = {"" = "."}
+
+[tool.pylint.'MESSAGES CONTROL']
+disable = "line-too-long"
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "*_test.py"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+select = ["E", "F", "B", "I"]
+ignore = []
