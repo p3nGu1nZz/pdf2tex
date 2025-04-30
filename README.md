@@ -24,17 +24,23 @@ pip install pdf2tex
 
 > `venv` support is optional with `python -m venv .venv`
 
-### CUDA Support
+### CUDA Support (Optional GPU Acceleration)
 
-To enable CUDA support for GPU acceleration use the following command
+To enable CUDA support for GPU acceleration, you need to replace the standard CPU versions of PyTorch and Torchvision with their CUDA-enabled counterparts. Use the following commands with `uv`:
 
-```bash
-# remove CPU version of torch
-pip uninstall torch torchvision
+#### Windows & Linux
 
-# install CUDA from wheels
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-```
+1.  **Uninstall existing CPU versions:**
+    ```bash
+    uv pip uninstall torch torchvision
+    ```
+
+2.  **Install CUDA-enabled versions (e.g., for CUDA 12.6):**
+    ```bash
+    # Replace 'cu126' with your specific CUDA version if needed
+    uv pip install torch torchvision --torch-backend cu126
+    ```
+    *Note: The `--torch-backend` flag in `uv` is experimental.*
 
 ## Command-Line Usage
 
@@ -51,7 +57,7 @@ pdf2tex --path path/to/your/documents/ --output ./output_projects --data ./temp_
 * `--file, -f`: Path to the PDF file to convert.
 * `--path, -p`: Path to the directory containing PDFs to convert.
 * `--output, -o`: Output directory for generated LaTeX projects (default: current directory).
-* `--data, -d`: Directory for storing intermediate files (default: `data`). # Renamed --data-dir to --data
+* `--data, -d`: Directory for storing intermediate files (default: `data`).
 * `--version`: Show the version and exit.
 * `--help, -h`: Show help message and exit.
 
@@ -71,7 +77,7 @@ pdf2tex.convert_pdf('path/to/document.pdf')
 pdf2tex.convert_pdf(
     pdf_path='path/to/document.pdf',
     output_dir='./my_output_folder',
-    data='./my_temp_data' # Renamed data_dir to data
+    data='./my_temp_data'
 )
 ```
 
@@ -84,7 +90,7 @@ import pdf2tex
 pdf2tex.convert_pdfs_in_directory(
     directory_path='path/to/pdf_folder',
     output_dir='./latex_projects_output',
-    data='./conversion_temp' # Renamed data_dir to data
+    data='./conversion_temp'
 )
 ```
 
@@ -92,16 +98,16 @@ pdf2tex.convert_pdfs_in_directory(
 
 The main functions available for programmatic use are:
 
-* `convert_pdf(pdf_path, output_dir='.', data='data')`: Convert a single PDF file. # Renamed data_dir to data
-* `convert_pdfs_in_directory(directory_path, output_dir='.', data='data')`: Convert all PDFs in a directory. # Renamed data_dir to data
-* `convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER)`: Core function that handles both files and directories. # Renamed data_dir to data
-* `async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER)`: Asynchronous version of convert. # Renamed data_dir to data
+* `convert_pdf(pdf_path, output_dir='.', data='data')`: Convert a single PDF file.
+* `convert_pdfs_in_directory(directory_path, output_dir='.', data='data')`: Convert all PDFs in a directory.
+* `convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER)`: Core function that handles both files and directories.
+* `async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER)`: Asynchronous version of convert.
 
 All parameters match the CLI arguments:
 * `pdf_path`/`source_path`: Path to the PDF file to convert.
 * `directory_path`/`source_path`: Path to the directory containing PDFs to convert.
 * `output_dir`: Output directory for generated LaTeX projects (default: current directory).
-* `data`: Directory for storing intermediate files (default: `data`). # Renamed data_dir to data
+* `data`: Directory for storing intermediate files (default: `data`).
 
 ## Development
 
@@ -116,7 +122,7 @@ cd pdf2tex
 python -m venv .venv
 
 # Activate - Linux
-.venv\Source\activate
+source .venv/bin/activate
 
 # or
 
