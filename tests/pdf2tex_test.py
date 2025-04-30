@@ -291,40 +291,45 @@ class TestConversion:
     async def test_async_convert_single_file(self, loaded_dependencies, test_directory):
         """Test asynchronous conversion of a single file."""
         output_dir = test_directory
-        data_dir = test_directory
-        with mock.patch('pdf2tex.pdf2tex.PDF.async_init') as mock_pdf_init:
-            mock_pdf = mock.AsyncMock()
-            mock_pdf.project_dir = "project_dir"
-            mock_pdf.name = "test_pdf"
-            mock_pdf_init.return_value = mock_pdf
+        data = test_directory
+        # Patch os.path.isfile to simulate the file existing
+        with mock.patch('os.path.isfile', return_value=True):
+            with mock.patch('pdf2tex.pdf2tex.PDF.async_init') as mock_pdf_init:
+                mock_pdf = mock.AsyncMock()
+                mock_pdf.project_dir = "project_dir"
+                mock_pdf.name = "test_pdf"
+                mock_pdf_init.return_value = mock_pdf
 
-            with mock.patch('pdf2tex.pdf2tex.TexFile.async_init') as mock_tex_init:
-                mock_tex = mock.AsyncMock()
-                mock_tex_init.return_value = mock_tex
+                with mock.patch('pdf2tex.pdf2tex.TexFile.async_init') as mock_tex_init:
+                    mock_tex = mock.AsyncMock()
+                    mock_tex_init.return_value = mock_tex
 
-                with mock.patch('pdf2tex.pdf2tex.Utils.get_file_name',
-                                return_value="test_pdf"):
-                    output_tex_path = os.path.join(output_dir, "test_pdf", "test_pdf.tex")
-                    with mock.patch('pdf2tex.pdf2tex.safe_join',
-                                    return_value=output_tex_path):
-                        with mock.patch('builtins.open', mock.mock_open()):
-                            await async_convert("test.pdf", output_dir, data_dir)
-                            mock_pdf_init.assert_called_once()
-                            mock_tex_init.assert_called_once()
-                            mock_tex.async_generate_tex_file.assert_called_once()
+                    with mock.patch('pdf2tex.pdf2tex.Utils.get_file_name',
+                                    return_value="test_pdf"):
+                        output_tex_path = os.path.join(output_dir, "test_pdf", "test_pdf.tex")
+                        with mock.patch('pdf2tex.pdf2tex.safe_join',
+                                        return_value=output_tex_path):
+                            # Mock builtins.open for TexFile.async_generate_tex_file
+                            with mock.patch('builtins.open', mock.mock_open()):
+                                await async_convert("test.pdf", output_dir, data)
+                                mock_pdf_init.assert_called_once()
+                                mock_tex_init.assert_called_once()
+                                mock_tex.async_generate_tex_file.assert_called_once()
 
     def test_convert(self, loaded_dependencies, test_directory):
         """Test synchronous conversion function."""
         output_dir = test_directory
-        data_dir = test_directory
+        data = test_directory  # Renamed data_dir to data
         with mock.patch('asyncio.run') as mock_run:
-            convert("test.pdf", output_dir, data_dir)
+            convert("test.pdf", output_dir, data)  # Renamed data_dir to data
             mock_run.assert_called_once()
 
+    # Suppress the warning about async_convert not being awaited due to mocking
+    @pytest.mark.filterwarnings("ignore:coroutine 'async_convert' was never awaited")
     def test_convert_pdf(self, test_directory):
         """Test convert_pdf convenience function."""
         output_dir = test_directory
-        data_dir = test_directory
+        data = test_directory  # Renamed data_dir to data
 
         # Patch convert in the pdf2tex package namespace (where convert_pdf will look for it)
         with mock.patch('pdf2tex.convert') as mock_convert:
@@ -336,10 +341,10 @@ class TestConversion:
                     f.write("dummy content")
 
                 # Call the function imported from pdf2tex (package)
-                convert_pdf(test_file, output_dir, data_dir)
+                convert_pdf(test_file, output_dir, data)  # Renamed data_dir to data
 
                 # Verify the convert function was called with correct args
-                mock_convert.assert_called_once_with(test_file, output_dir, data_dir)
+                mock_convert.assert_called_once_with(test_file, output_dir, data)  # Renamed data_dir to data
 
 
 class TestSafety:

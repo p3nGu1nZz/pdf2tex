@@ -12,7 +12,6 @@ Uses asyncio and ThreadPoolExecutor for parallel processing.
 import os
 import re
 import sys
-import traceback
 import asyncio
 import concurrent.futures
 
@@ -1069,92 +1068,56 @@ def print_error(msg):
     console.print(msg, style="danger")
 
 
-async def async_convert(source_path, output_dir='.', data_dir=DEFAULT_DATA_FOLDER):
-    """Asynchronously convert PDF files to LaTeX."""
-    # Load dependencies when called programmatically
+async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER):  # Renamed data_dir to data
+    """Asynchronously convert a PDF file or directory of PDF files to LaTeX."""
     _ensure_dependencies_loaded()
+    console.print(f"Processing file: {source_path}", style="info")
 
-    os.makedirs(data_dir, exist_ok=True)
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(data, exist_ok=True)  # Renamed data_dir to data
 
     if os.path.isdir(source_path):
-        console.print(f"Processing directory: {source_path}", style="status")
-        files = [
-            f for f in os.listdir(source_path)
-            if os.path.isfile(os.path.join(source_path, f))
-            and f.lower().endswith('.pdf')
-        ]
-
-        if not files:
-            console.print(
-                "No PDF files found in the specified directory.",
-                style="danger"
-            )
+        pdf_files = [f for f in os.listdir(source_path) if f.lower().endswith('.pdf')]
+        if not pdf_files:
+            console.print(f"No PDF files found in directory: {source_path}", style="warning")
             return
 
-        console.print(f"Found {len(files)} PDF files", style="info")
-        await asyncio.gather(
-            *[
-                async_convert(
-                    os.path.join(source_path, filename),
-                    output_dir, data_dir
-                )
-                for filename in files
-            ]
-        )
-        return
+        tasks = []
+        for filename in pdf_files:
+            file_path = os.path.join(source_path, filename)
+            # Create a unique output subdir for each file based on its name
+            file_output_dir_name = Utils.get_file_name(filename)
+            file_output_dir = safe_join(output_dir, file_output_dir_name)
+            # Pass the specific output dir and the main data dir
+            tasks.append(async_convert(file_path, file_output_dir, data))  # Renamed data_dir to data
 
-    if not source_path.lower().endswith('.pdf'):
-        console.print(f"Skipping non-PDF file: {source_path}", style="danger")
-        return
+        await asyncio.gather(*tasks)
 
-    console.print(f"Processing file: {source_path}", style="status")
-    try:
-        pdf = await PDF.async_init(source_path, data_dir, output_dir)
-        texfile = await TexFile.async_init(pdf)
-        tex_filename = f"{Utils.get_file_name(source_path)}.tex"
-        output_filename = safe_join(pdf.project_dir, tex_filename)
-        await texfile.async_generate_tex_file(output_filename)
-        console.print(
-            f"Successfully generated LaTeX project at {pdf.project_dir}",
-            style="success"
-        )
+    elif os.path.isfile(source_path) and source_path.lower().endswith('.pdf'):
+        try:
+            # PDF.async_init now needs the data directory
+            pdf = await PDF.async_init(source_path, data, output_dir)  # Renamed data_dir to data
+            if pdf:
+                tex_file = await TexFile.async_init(pdf)
+                if tex_file:
+                    await tex_file.async_generate_tex_file()
+                    console.print(
+                        f"Successfully generated LaTeX project at\n{pdf.project_dir}",
+                        style="success"
+                    )
+                else:
+                    console.print(f"Failed to initialize TexFile for {source_path}", style="danger")
+            else:
+                console.print(f"Failed to initialize PDF for {source_path}", style="danger")
 
-        readme_content = [
-            f"# {pdf.name} LaTeX Project",
-            "",
-            "This LaTeX project was automatically generated from a PDF file "
-            "using pdf2tex.",
-            "",
-            "## Structure",
-            "- `" + tex_filename + "`: The main LaTeX file",
-            "- `figures/`: Directory containing figures extracted from the PDF",
-            "- `build/`: Directory containing intermediate build files",
-            "",
-            "## Compilation",
-            "To compile this LaTeX project, run:",
-            "```",
-            f"pdflatex {tex_filename}",
-            "```",
-            "",
-            "For better results with references, run pdflatex multiple times:",
-            "```",
-            f"pdflatex {tex_filename}",
-            f"pdflatex {tex_filename}",
-            "```",
-        ]
-
-        with open(
-            safe_join(pdf.project_dir, "README.md"), "w", encoding="utf-8"
-        ) as f:
-            f.write("\n".join(readme_content))
-
-    except Exception as e:  # pylint: disable=broad-except
-        console.print(f"Error processing {source_path}: {e}", style="danger")
-        traceback.print_exc()
+        except Exception as e:  # pylint: disable=broad-except
+            console.print(f"Error processing {source_path}: {e}", style="danger")
+            # Optionally print traceback for debugging
+            # traceback.print_exc()
+    else:
+        console.print(f"Invalid source path: {source_path}. Must be a PDF file or directory.", style="danger")
 
 
-def convert(source_path, output_dir='.', data_dir=DEFAULT_DATA_FOLDER):
-    """Synchronous wrapper for the async convert function."""
-    # _ensure_dependencies_loaded() will be called inside async_convert
-    asyncio.run(async_convert(source_path, output_dir, data_dir))
+def convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER):  # Renamed data_dir to data
+    """Synchronously convert a PDF file or directory of PDF files to LaTeX."""
+    # Runs the async_convert function using asyncio.run()
+    asyncio.run(async_convert(source_path, output_dir, data))  # Renamed data_dir to data

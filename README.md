@@ -43,7 +43,7 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 pdf2tex --file path/to/your/document.pdf --output ./output_project
 
 # Convert all PDFs in a directory
-pdf2tex --path path/to/your/documents/ --output ./output_projects --data-dir ./temp_data
+pdf2tex --path path/to/your/documents/ --output ./output_projects --data ./temp_data
 ```
 
 **Options:**
@@ -51,7 +51,7 @@ pdf2tex --path path/to/your/documents/ --output ./output_projects --data-dir ./t
 * `--file, -f`: Path to the PDF file to convert.
 * `--path, -p`: Path to the directory containing PDFs to convert.
 * `--output, -o`: Output directory for generated LaTeX projects (default: current directory).
-* `--data-dir, -d`: Directory for storing intermediate files (default: `data`).
+* `--data, -d`: Directory for storing intermediate files (default: `data`). # Renamed --data-dir to --data
 * `--version`: Show the version and exit.
 * `--help, -h`: Show help message and exit.
 
@@ -71,7 +71,7 @@ pdf2tex.convert_pdf('path/to/document.pdf')
 pdf2tex.convert_pdf(
     pdf_path='path/to/document.pdf',
     output_dir='./my_output_folder',
-    data_dir='./my_temp_data'
+    data='./my_temp_data' # Renamed data_dir to data
 )
 ```
 
@@ -84,7 +84,7 @@ import pdf2tex
 pdf2tex.convert_pdfs_in_directory(
     directory_path='path/to/pdf_folder',
     output_dir='./latex_projects_output',
-    data_dir='./conversion_temp'
+    data='./conversion_temp' # Renamed data_dir to data
 )
 ```
 
@@ -92,20 +92,20 @@ pdf2tex.convert_pdfs_in_directory(
 
 The main functions available for programmatic use are:
 
-* `convert_pdf(pdf_path, output_dir='.', data_dir='data')`: Convert a single PDF file.
-* `convert_pdfs_in_directory(directory_path, output_dir='.', data_dir='data')`: Convert all PDFs in a directory.
-* `convert(source_path, output_dir='.', data_dir=DEFAULT_DATA_FOLDER)`: Core function that handles both files and directories.
-* `async_convert(source_path, output_dir='.', data_dir=DEFAULT_DATA_FOLDER)`: Asynchronous version of convert.
+* `convert_pdf(pdf_path, output_dir='.', data='data')`: Convert a single PDF file. # Renamed data_dir to data
+* `convert_pdfs_in_directory(directory_path, output_dir='.', data='data')`: Convert all PDFs in a directory. # Renamed data_dir to data
+* `convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER)`: Core function that handles both files and directories. # Renamed data_dir to data
+* `async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER)`: Asynchronous version of convert. # Renamed data_dir to data
 
 All parameters match the CLI arguments:
 * `pdf_path`/`source_path`: Path to the PDF file to convert.
 * `directory_path`/`source_path`: Path to the directory containing PDFs to convert.
 * `output_dir`: Output directory for generated LaTeX projects (default: current directory).
-* `data_dir`: Directory for storing intermediate files (default: `data`).
+* `data`: Directory for storing intermediate files (default: `data`). # Renamed data_dir to data
 
 ## Development
 
-To begin developing your own features or contribution to `pdf2tex` follow the instructions below. 
+To begin developing your own features or contribution to `pdf2tex` follow the instructions below.
 
 ```bash
 # Clone the repo using git
@@ -116,7 +116,7 @@ cd pdf2tex
 python -m venv .venv
 
 # Activate - Linux
-.venv\Source\activate  
+.venv\Source\activate
 
 # or
 
