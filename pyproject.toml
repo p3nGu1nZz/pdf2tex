@@ -47,7 +47,7 @@ dev = [
 ]
 
 [project.scripts]
-pdf2tex = "pdf2tex.pdf2tex:main"
+pdf2tex = "pdf2tex:main"
 
 [project.urls]
 "Homepage" = "https://github.com/p3nGu1nZz/pdf2tex"
