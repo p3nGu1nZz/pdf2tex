@@ -4,13 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdf2tex"
-version = "0.1.0"
+version = "0.1.1"
 description = "Easily convert PDF files to LaTeX with OCR."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [
     {name = "Rawson K.", email = "backrqqms@gmail.com"},
+]
+keywords = [
+    "pdf",
+    "tex",
+    "latex",
+    "ocr",
+    "easyocr",
+    "pymupdf",
+    "opencv-python",
+    "pdf2image",
+    "torch",
+    "torchvision",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -48,6 +60,11 @@ dev = [
 
 [project.scripts]
 pdf2tex = "pdf2tex:main_cli"
+
+[project.urls]
+"Homepage" = "https://github.com/p3nGu1nZz/pdf2tex"
+"Bug Tracker" = "https://github.com/p3nGu1nZz/pdf2tex/issues"
+
 
 [tool.setuptools]
 packages = ["pdf2tex"]

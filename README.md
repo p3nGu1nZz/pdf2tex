@@ -32,15 +32,14 @@ To enable CUDA support for GPU acceleration, you need to replace the standard CP
 
 1.  **Uninstall existing CPU versions:**
     ```bash
-    uv pip uninstall torch torchvision
+    pip uninstall torch torchvision
     ```
 
 2.  **Install CUDA-enabled versions (e.g., for CUDA 12.6):**
     ```bash
     # Replace 'cu126' with your specific CUDA version if needed
-    uv pip install torch torchvision --torch-backend cu126
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
     ```
-    *Note: The `--torch-backend` flag in `uv` is experimental.*
 
 ## Command-Line Usage
 

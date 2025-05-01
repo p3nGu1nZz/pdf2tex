@@ -174,3 +174,4 @@ cython_debug/
 .pypirc
 out_dir
 data
+uv.lock
