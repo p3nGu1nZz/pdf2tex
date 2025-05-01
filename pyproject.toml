@@ -47,11 +47,7 @@ dev = [
 ]
 
 [project.scripts]
-pdf2tex = "pdf2tex:main"
-
-[project.urls]
-"Homepage" = "https://github.com/p3nGu1nZz/pdf2tex"
-"Bug Tracker" = "https://github.com/p3nGu1nZz/pdf2tex/issues"
+pdf2tex = "pdf2tex:main_cli"
 
 [tool.setuptools]
 packages = ["pdf2tex"]

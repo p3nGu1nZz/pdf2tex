@@ -8,15 +8,16 @@ import os
 import shutil
 import sys
 import tempfile
+import unittest
 import unittest.mock as mock
 
 import numpy as np
 import pytest
 import pytest_asyncio
 
-import pdf2tex.pdf2tex as pdf2tex_module
+import pdf2tex.main as pdf2tex_module
 from pdf2tex import convert_pdf, convert
-from pdf2tex.pdf2tex import (
+from pdf2tex.main import (
     BBox,
     Command,
     Environment,
@@ -28,8 +29,8 @@ from pdf2tex.pdf2tex import (
     _ensure_dependencies_loaded,
     async_convert,
     process_bboxes,
-    safe_join,
 )
+from pdf2tex.utils import Utils
 
 
 # --- Test Fixtures ---
@@ -94,7 +95,7 @@ def loaded_dependencies():
 
 
 # --- Unit Tests ---
-class TestUtils:
+class TestUtils(unittest.TestCase):
     """Tests for the Utils class."""
 
     def test_get_file_name(self):
@@ -159,6 +160,23 @@ class TestUtils:
         assert len(result) == 2
         assert result[0].y == 10
         assert result[1].y == 20
+
+    def test_safe_join(self):
+        """Test the safe_join utility function."""
+        base = os.path.abspath(os.path.join(os.getcwd(), "test_base"))
+        os.makedirs(base, exist_ok=True)
+        # Update call site
+        assert Utils.safe_join(base, "subdir") == os.path.join(base, "subdir")
+        # Update call site
+        assert Utils.safe_join(base, "subdir", "file.txt") == os.path.join(base, "subdir", "file.txt")
+        with self.assertRaises(ValueError):
+            # Update call site
+            Utils.safe_join(base, "../../../etc/passwd")
+        with self.assertRaises(ValueError):
+            # Update call site
+            Utils.safe_join(base, "..", "sibling_dir") # Assuming sibling_dir is outside test_base
+        # Clean up
+        shutil.rmtree(base)
 
 
 class TestBBox:
@@ -345,21 +363,6 @@ class TestConversion:
 
                 # Verify the convert function was called with correct args
                 mock_convert.assert_called_once_with(test_file, output_dir, data)  # Renamed data_dir to data
-
-
-class TestSafety:
-    """Tests for safety functions."""
-
-    def test_safe_join(self):
-        """Test safe path joining."""
-        base = os.path.abspath("/base/path")
-
-        # Valid path
-        assert safe_join(base, "subdir") == os.path.join(base, "subdir")
-
-        # Path traversal attempt
-        with pytest.raises(ValueError):
-            safe_join(base, "../../../etc/passwd")
 
 
 class TestDependencyLoading:
