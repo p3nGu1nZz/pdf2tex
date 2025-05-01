@@ -6,6 +6,7 @@ from rich.progress import (
     TextColumn,
     TimeRemainingColumn,
     TimeElapsedColumn,
+    Progress,  # Import Progress
 )
 from rich.theme import Theme
 
@@ -26,16 +27,11 @@ custom_theme = Theme({
 })
 console = Console(theme=custom_theme)
 
-# Configure Progress columns
+# Define standard progress columns
 progress_columns = [
-    TextColumn("[progress.description]{task.description}", justify="right"),
-    BarColumn(
-        bar_width=None,
-        complete_style="bar.complete",
-        finished_style="bar.finished",
-        pulse_style="bar.pulse"
-    ),
-    "[progress.percentage]{task.percentage:>3.1f}%",
+    TextColumn("[progress.description]{task.description}"),
+    BarColumn(),
+    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
     TimeRemainingColumn(),
     TimeElapsedColumn(),
 ]

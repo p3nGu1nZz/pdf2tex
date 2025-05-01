@@ -9,7 +9,7 @@ import os
 import sys
 import click
 
-__version__ = "1.0.0"
+__version__ = "0.1.2"
 
 # Import main functions/classes
 from .main import (

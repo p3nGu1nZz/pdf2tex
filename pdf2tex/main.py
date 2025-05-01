@@ -12,21 +12,25 @@ Uses asyncio and ThreadPoolExecutor for parallel processing.
 import os
 import sys
 import asyncio
-import concurrent.futures  # Import concurrent.futures
+import concurrent.futures
+import time  # For timing phases
+import traceback  # Import traceback
+import gc  # Import garbage collector
+
+from rich.progress import Progress
 
 from .utils import Utils
 from .bbox import BBox
 from .tex_file import TexFile
 from .pdf import PDF
 from .ui import console, progress_columns, custom_theme
-# Import constants
 from .constants import (
     DEFAULT_DATA_FOLDER,
     MIN_TEXT_SIZE,
     HORIZONTAL_POOLING,
-    MAX_WORKERS
+    MAX_WORKERS,
+    IMAGE_EXTRACTION_WORKERS
 )
-
 
 # --- Globals that will be initialized later ---
 READER = None
@@ -37,6 +41,12 @@ NP = None
 TORCH = None
 EASYOCR = None
 IS_LOADED = False
+
+# Ensure TORCH is imported if not already
+try:
+    import torch as TORCH
+except ImportError:
+    TORCH = None  # Handle case where torch might not be installed initially
 
 # --- Dependency Loading Function ---
 def _ensure_dependencies_loaded():
@@ -122,108 +132,254 @@ def print_error(msg):
     console.print(msg, style="danger")
 
 
-async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER):
-    """Asynchronously convert a PDF file or directory of PDF files to LaTeX."""
-    _ensure_dependencies_loaded()
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
+async def _extract_images_for_pdf(pdf_path, base_output_dir, executor, fitz_module, console_instance, progress, task_id):
+    """Helper coroutine for Phase 1: Extracts images for a single PDF."""
+    pdf_name = Utils.get_file_name(pdf_path)
+    project_paths = Utils.create_latex_project_structure(base_output_dir, pdf_name)
+    build_dir = project_paths["build_dir"]
+    temp_asset_folder = Utils.safe_join(build_dir, "assets")
+    os.makedirs(temp_asset_folder, exist_ok=True)
 
+    progress.update(task_id, description=f"[cyan]Extracting {pdf_name}...")
+
+    success, image_paths = await Utils.extract_images_from_pdf(
+        pdf_path, temp_asset_folder, executor, fitz_module, console_instance, progress, task_id
+    )
+    if not success:
+        progress.update(task_id, description=f"[red]Failed {pdf_name}")
+    return pdf_path, project_paths["project_dir"], success, image_paths
+
+
+async def _process_pdf_content(pdf_path, project_dir, image_paths, gpu_executor, gpu_semaphore, data_folder, progress, page_task_id, block_task_id):
+    """Helper coroutine for Phase 2: Processes content and generates LaTeX."""
+    pdf_name = Utils.get_file_name(pdf_path)
+    pdf = None
+    try:
+        pdf = await PDF.async_init(
+            pdf_path, NP, CV2, FITZ, READER, gpu_executor, console, gpu_semaphore,
+            extracted_image_paths=image_paths,
+            data_folder=data_folder,
+            output_dir=os.path.dirname(project_dir),
+            progress=progress,
+            page_task_id=page_task_id,
+            block_task_id=block_task_id
+        )
+        if not pdf or not pdf.pages:
+            console.print(f"[Phase 2] Failed to initialize or find pages for {pdf_name}", style="danger")
+            return False, project_dir, pdf_name, []
+
+        generated_content = await pdf.async_generate_latex_content()
+
+        return True, project_dir, pdf_name, generated_content
+
+    except Exception as e:
+        console.print(f"[Phase 2] Error processing content for {pdf_name}: {e}", style="danger")
+        console.print(traceback.format_exc(), style="dim")
+        if pdf and pdf.num_pages > 0 and progress and page_task_id is not None:
+            task = progress.tasks[page_task_id]
+            remaining_pages = pdf.num_pages
+            progress.update(page_task_id, advance=remaining_pages, description="[red]Page processing error")
+        return False, project_dir, pdf_name, []
+
+
+async def _assemble_latex_file(project_dir, pdf_name, content_list, progress, assembly_task_id):
+    """Helper coroutine for Phase 3: Assembles and writes the .tex file."""
+    try:
+        progress.update(assembly_task_id, description=f"[yellow]Assembling {pdf_name}.tex...")
+        tex_file = await TexFile.async_init(content_list=content_list, project_dir=project_dir, name=pdf_name)
+        await tex_file.async_generate_tex_file()
+        progress.update(assembly_task_id, advance=1, description=f"[yellow]Assembling {pdf_name}.tex... Done")
+        return True
+    except Exception as e:
+        console.print(f"[Phase 3] Error assembling file for {pdf_name}: {e}", style="danger")
+        progress.update(assembly_task_id, description=f"[red]Assembly failed {pdf_name}")
+        return False
+
+
+async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER):
+    """Asynchronously convert PDF(s) using a three-phase approach with progress bars."""
+    _ensure_dependencies_loaded()
+    start_time = time.monotonic()
+
+    pdf_paths_to_process = []
     if os.path.isdir(source_path):
         pdf_files = [f for f in os.listdir(source_path) if f.lower().endswith('.pdf')]
-
         if not pdf_files:
             console.print(f"No PDF files found in directory: {source_path}", style="warning")
             return
-
-        tasks = []
-        for filename in pdf_files:
-            file_path = os.path.join(source_path, filename)
-            file_output_dir_name = Utils.get_file_name(filename)
-            file_output_dir = Utils.safe_join(output_dir, file_output_dir_name)
-            tasks.append(async_convert(file_path, file_output_dir, data))  # Pass console if needed for recursive calls
-
-        await asyncio.gather(*tasks)
-
+        pdf_paths_to_process = [os.path.join(source_path, f) for f in pdf_files]
+        console.print(f"Found {len(pdf_paths_to_process)} PDF(s) in directory.", style="info")
     elif os.path.isfile(source_path) and source_path.lower().endswith('.pdf'):
-        console.print(f"Processing file: {source_path}", style="info")
-        console.print(f"Using output directory: {output_dir}", style="info")
-        pdf = None  # Initialize pdf to None
-        try:
-            # Pass console instance to PDF.async_init
-            pdf = await PDF.async_init(
-                source_path, NP, CV2, FITZ, READER, executor, console, data, output_dir
-            )
-            if not pdf:
-                console.print(f"Failed to initialize PDF for {source_path}", style="danger")
-                executor.shutdown(wait=False)  # Ensure executor shutdown on early exit
-                return
-
-            try:
-                tex_filename = Utils.safe_join(pdf.project_dir, f"{pdf.name}.tex")
-                tex_file = await TexFile.async_init(pdf)
-                await tex_file.async_generate_tex_file(tex_filename)
-                console.print(
-                    f"Successfully generated LaTeX project at\n{pdf.project_dir}",
-                    style="success"
-                )
-            except (TypeError, ValueError, AttributeError) as tex_error:
-                console.print(f"Failed to generate LaTeX for {source_path}: {tex_error}", style="danger")
-                if pdf:  # Check if pdf was initialized
-                    try:
-                        console.print("Attempting to save partial results...", style="warning")
-                        tex_filename = Utils.safe_join(pdf.project_dir, f"{pdf.name}_partial.tex")
-                        basic_tex_file = TexFile(pdf)
-                        basic_tex_file.generate_tex_file(tex_filename)
-                        console.print(f"Saved partial results to {tex_filename}", style="info")
-                    except (IOError, OSError) as partial_save_error:
-                        console.print(f"Could not save partial results: {partial_save_error}", style="danger")
-                    except Exception as partial_save_error:  # pylint: disable=broad-except
-                        console.print(f"Unexpected error saving partial results: {partial_save_error}", style="danger")
-                else:
-                    console.print("Cannot save partial results as PDF object was not created.", style="warning")
-            except Exception as tex_error:  # pylint: disable=broad-except
-                console.print(f"Unexpected error generating LaTeX for {source_path}: {tex_error}", style="danger")
-                if pdf:  # Check if pdf was initialized
-                    try:
-                        console.print("Attempting to save partial results...", style="warning")
-                        tex_filename = Utils.safe_join(pdf.project_dir, f"{pdf.name}_partial.tex")
-                        basic_tex_file = TexFile(pdf)
-                        basic_tex_file.generate_tex_file(tex_filename)
-                        console.print(f"Saved partial results to {tex_filename}", style="info")
-                    except (IOError, OSError) as partial_save_error:
-                        console.print(f"Could not save partial results: {partial_save_error}", style="danger")
-                    except Exception as partial_save_error:  # pylint: disable=broad-except
-                        console.print(f"Unexpected error saving partial results: {partial_save_error}", style="danger")
-                else:
-                    console.print("Cannot save partial results as PDF object was not created.", style="warning")
-        except (FileNotFoundError, PermissionError, RuntimeError, ValueError) as e:
-            console.print(f"Error processing {source_path}: {str(e)}", style="danger")
-            if "Block" in str(e) and "attribute" in str(e):
-                console.print("The PDF structure could not be properly analyzed. Try a different PDF file.", style="danger")
-        except Exception as e:  # pylint: disable=broad-except
-            console.print(f"Unexpected critical error processing {source_path}: {e}", style="danger")
-            import traceback
-            traceback.print_exc()
-        finally:  # Ensure executor is always shut down
-            executor.shutdown(wait=True)
+        pdf_paths_to_process = [source_path]
+        console.print(f"Processing single PDF file: {source_path}", style="info")
     else:
         print_error(f"Invalid source path: {source_path}")
+        return
+
+    if not pdf_paths_to_process:
+        console.print("No PDF files found to process.", style="warning")
+        return
+
+    # Initialize variables to store summary counts
+    successful_extractions_count = 0
+    failed_extractions_count = 0
+    successful_processing_count = 0
+    failed_processing_count = 0
+    assembly_success_count = 0
+    failed_assembly_count = 0
+    total_pdfs_processed = len(pdf_paths_to_process)  # Store initial count
+
+    with Progress(*progress_columns, console=console, transient=False) as progress:
+
+        phase1_task_id = progress.add_task("[bold cyan]Phase 1: Extracting Images...", total=len(pdf_paths_to_process))
+        phase1_start_time = time.monotonic()
+        image_executor = concurrent.futures.ThreadPoolExecutor(max_workers=IMAGE_EXTRACTION_WORKERS, thread_name_prefix='ImgExtract')
+        extraction_tasks = []
+        pdf_extraction_task_ids = {}
+
+        for pdf_path in pdf_paths_to_process:
+            task_id = progress.add_task(f"[cyan]Queued {Utils.get_file_name(pdf_path)}", total=1, start=False)
+            pdf_extraction_task_ids[pdf_path] = task_id
+            extraction_tasks.append(
+                _extract_images_for_pdf(pdf_path, output_dir, image_executor, FITZ, console, progress, task_id)
+            )
+
+        extraction_results = []
+        if extraction_tasks:
+            extraction_results = await asyncio.gather(*extraction_tasks)
+
+        image_executor.shutdown(wait=True)
+        progress.update(phase1_task_id, completed=len(pdf_paths_to_process), description="[bold green]Phase 1: Image Extraction Complete")
+        # Calculate counts but don't print yet
+        successful_extractions = [res for res in extraction_results if res[2]]
+        successful_extractions_count = len(successful_extractions)
+        failed_extractions_count = total_pdfs_processed - successful_extractions_count
+
+        if not successful_extractions:
+            # Print immediate exit message if needed
+            console.print("No PDFs remaining after image extraction phase. Exiting.", style="warning")
+            return  # Exit before printing summaries
+
+        phase2_docs_task_id = progress.add_task("[bold magenta]Phase 2: Processing Documents...", total=successful_extractions_count)
+        total_pages_to_process = 0
+        page_count_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix='PageCount')
+        temp_doc = None
+        console.print("Calculating total pages for progress...", style="info")
+        for pdf_path, _, _, _ in successful_extractions:
+            temp_doc = None  # Initialize temp_doc for each iteration
+            try:
+                # Open doc and get count within the try block
+                temp_doc = await asyncio.get_running_loop().run_in_executor(page_count_executor, FITZ.open, pdf_path)
+                total_pages_to_process += temp_doc.page_count
+            except Exception as e:
+                console.print(f"Warning: Could not get page count for {pdf_path}: {e}", style="warning")
+            finally:
+                # Close doc in the finally block, ensuring it happens after try
+                if temp_doc:
+                    await asyncio.get_running_loop().run_in_executor(page_count_executor, temp_doc.close)  # Close moved here
+        page_count_executor.shutdown(wait=True)
+        console.print(f"Total pages to process: {total_pages_to_process}", style="info")
+
+        phase2_pages_task_id = progress.add_task("[cyan]Processing Pages...", total=total_pages_to_process)
+        phase2_start_time = time.monotonic()
+        gpu_semaphore = asyncio.Semaphore(MAX_WORKERS)
+        gpu_executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix='GPUWorker')
+
+        processed_data_for_phase3 = []
+        for pdf_path, project_dir, _, image_paths in successful_extractions:
+            phase2_blocks_task_id = progress.add_task(f"[yellow]Processing Blocks ({Utils.get_file_name(pdf_path)})...", start=False)
+            progress.update(phase2_docs_task_id, description=f"[bold magenta]Phase 2: Processing {Utils.get_file_name(pdf_path)}...")
+            progress.start_task(phase2_blocks_task_id)
+
+            success, _, pdf_name, generated_content = await _process_pdf_content(
+                pdf_path, project_dir, image_paths, gpu_executor, gpu_semaphore, data, progress, phase2_pages_task_id, phase2_blocks_task_id
+            )
+
+            progress.stop_task(phase2_blocks_task_id)
+
+            if success:
+                processed_data_for_phase3.append((project_dir, pdf_name, generated_content))
+            progress.update(phase2_docs_task_id, advance=1)
+
+            del generated_content
+            gc.collect()
+            if TORCH and TORCH.cuda.is_available():
+                TORCH.cuda.empty_cache()
+
+        gpu_executor.shutdown(wait=True)
+        progress.update(phase2_pages_task_id, completed=total_pages_to_process, description="[green]Page Processing Complete")
+        progress.update(phase2_docs_task_id, description="[bold green]Phase 2: Document Processing Complete")
+        # Calculate counts but don't print yet
+        successful_processing_count = len(processed_data_for_phase3)
+        failed_processing_count = successful_extractions_count - successful_processing_count
+
+        if not processed_data_for_phase3:
+            # Print immediate exit message if needed
+            console.print("No documents successfully processed for content. Exiting.", style="warning")
+            return  # Exit before printing summaries
+
+        phase3_task_id = progress.add_task("[bold yellow]Phase 3: Assembling LaTeX Files...", total=len(processed_data_for_phase3))
+        phase3_start_time = time.monotonic()
+        for project_dir, pdf_name, content_list in processed_data_for_phase3:
+            success = await _assemble_latex_file(project_dir, pdf_name, content_list, progress, phase3_task_id)
+            if success:
+                assembly_success_count += 1
+
+        progress.update(phase3_task_id, completed=len(processed_data_for_phase3), description="[bold green]Phase 3: LaTeX Assembly Complete")
+        # Calculate counts but don't print yet
+        failed_assembly_count = len(processed_data_for_phase3) - assembly_success_count
+
+    # --- End of `with Progress` block ---
+
+    # Print summaries AFTER the progress bars are finished
+    console.print(f"\n--- Summary ---", style="bold")
+    console.print(f"Phase 1 (Image Extraction): {successful_extractions_count} succeeded, {failed_extractions_count} failed.", style="info")
+    console.print(f"Phase 2 (Content Processing): {successful_processing_count} succeeded, {failed_processing_count} failed.", style="info")
+    console.print(f"Phase 3 (LaTeX Assembly):   {assembly_success_count} succeeded, {failed_assembly_count} failed.", style="info")
+
+    total_duration = time.monotonic() - start_time
+    console.print(f"\nTotal Conversion Time: {total_duration:.2f}s", style="bold green")
 
 
 def convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER):
     """Synchronously convert a PDF file or directory of PDF files to LaTeX."""
-    pdf = None  # Initialize pdf to None outside try block
     try:
-        # Note: async_convert now handles executor creation/shutdown
         asyncio.run(async_convert(source_path, output_dir, data))
     except Exception as e:
-        print_error(f"An error occurred during conversion: {e}")
-        # Check if 'pdf' might exist in the scope where the error happened
-        # This is tricky because the error might be deep inside asyncio.run
-        # A more robust approach might involve async_convert returning status/partial data
-        # For now, we add a basic check, but it might not always catch the pdf object
-        pdf_obj_in_scope = None
-        # This is a heuristic and might not work reliably depending on where the exception occurs
-        # A better approach would be structured error handling returning partial state.
-        # For simplicity, we'll rely on the checks within async_convert's except blocks.
-        # print_status("Attempting to save partial results if possible...")
-        # (Logic removed as it's unreliable here and handled better in async_convert)
+        print_error(f"An top-level error occurred during conversion: {e}")
+        console.print(traceback.format_exc(), style="dim")
+
+
+import click
+
+@click.command(context_settings=dict(help_option_names=["-h", "--help"]))
+@click.option(
+    "--file", "-f", type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+    help="Path to the PDF file to convert."
+)
+@click.option(
+    "--path", "-p", type=click.Path(exists=True, file_okay=False, resolve_path=True),
+    help="Path to the directory containing PDFs to convert."
+)
+@click.option(
+    "--output", "-o", type=click.Path(resolve_path=True), default=".", show_default=True,
+    help="Output directory for generated LaTeX projects."
+)
+@click.option(
+    "--data", "-d", type=click.Path(resolve_path=True), default=DEFAULT_DATA_FOLDER, show_default=True,
+    help="Directory for storing intermediate files (build artifacts)."
+)
+def main_cli(file, path, output, data):
+    """Converts PDF files to LaTeX using OCR and image extraction."""
+    if file:
+        convert(file, output, data)
+    elif path:
+        convert(path, output, data)
+    else:
+        console.print("Error: Please provide either a --file or a --path.", style="danger")
+        ctx = click.get_current_context()
+        console.print(ctx.get_help())
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main_cli()

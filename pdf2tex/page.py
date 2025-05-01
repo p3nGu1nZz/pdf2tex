@@ -3,6 +3,7 @@
 import re
 import asyncio
 import traceback  # Import traceback
+import gc  # Import gc
 
 from .bbox import BBox
 from .block import Block
@@ -14,7 +15,8 @@ from .ui import console  # Keep console import
 class Page:
     """Page object representing a PDF page containing Block objects."""
 
-    def __init__(self, page_img, parent_pdf, np_module, cv2_module, reader_instance, executor, page_num):
+    def __init__(self, page_img, parent_pdf, np_module, cv2_module, reader_instance, executor, gpu_semaphore, page_num,
+                 progress=None, page_task_id=None, block_task_id=None):  # Add block_task_id
         """Initialize a page with its image, parent PDF, and dependencies."""
         self.page_img = page_img
         self.parent_pdf = parent_pdf
@@ -24,73 +26,102 @@ class Page:
         self.cv2 = cv2_module
         self.reader = reader_instance
         self.executor = executor
+        self.gpu_semaphore = gpu_semaphore
         self.page_num = page_num
         self.blocks = []
+        # Store progress info if needed later
+        self.progress = progress
+        self.page_task_id = page_task_id
+        self.block_task_id = block_task_id  # Store block task id
 
-    async def process_single_block(self, bbox, page_image):
+    async def process_single_block(self, bbox, page_image, block_task_id):
         """Process a single bounding box to determine its content and create a Block."""
         loop = asyncio.get_running_loop()
+        block_type_str = "figure"  # Default to figure
+        content_string = ""
+        block = None  # Initialize block
         try:
-            # Determine content type asynchronously
-            block_type_str = await loop.run_in_executor(
-                self.executor, self._determine_content_type, bbox, page_image
-            )
-
-            # Extract content string based on type
-            content_string = ""
-            if block_type_str == "text":
-                content_string = await loop.run_in_executor(
-                    self.executor, self._extract_text_from_bbox, bbox, page_image
+            # Acquire semaphore before running OCR-related tasks in executor
+            async with self.gpu_semaphore:
+                # Determine content type asynchronously
+                block_type_str = await loop.run_in_executor(
+                    self.executor, self._determine_content_type, bbox, page_image
                 )
-            # Note: Image content string (filename) is handled within Block.generate_latex
 
-            # Directly create the Block instance, passing all dependencies
+                # Extract content string based on type (if text)
+                if block_type_str == "text":
+                    content_string = await loop.run_in_executor(
+                        self.executor, self._extract_text_from_bbox, bbox, page_image
+                    )
+            # Semaphore is released automatically here
+
+            # Pass determined type and content to Block constructor
             block = Block(
                 bbox=bbox,
                 parent_page=self,
                 np_module=self.np,
-                reader_instance=self.reader,
-                cv2_module=self.cv2
+                cv2_module=self.cv2,
+                block_type_str=block_type_str,
+                content_string=content_string
             )
-            # The block type and content string are determined within Block.__init__ now
+
+            # --- Update block progress bar ---
+            if self.progress and block_task_id is not None:
+                # Get current completed count before advancing
+                current_block_count = self.progress.tasks[block_task_id].completed + 1
+                self.progress.update(block_task_id, advance=1, description=f"[yellow]Processing Block {current_block_count} (Page {self.page_num})...")
+
+            # Clean up intermediate strings
+            del block_type_str, content_string
+            gc.collect()  # Optional: more aggressive cleanup within block processing
 
             return block
 
         except Exception as e:
-            console.print(f"Error processing block on page {self.page_num + 1} at bbox y={bbox.y}: {e}", style="danger")
-            raise  # Re-raise the exception to stop processing
+            console.print(f"Error processing block on page {self.page_num} at bbox y={bbox.y}: {e}", style="danger")
+            # traceback.print_exc() # Uncomment for debugging
+            # Clean up potentially partially created data
+            del block_type_str, content_string, block
+            gc.collect()
+            return None  # Return None instead of raising
 
-    async def async_generate_blocks(self):
-        """Asynchronously generate blocks for the page."""
+    async def async_generate_blocks(self, block_task_id):
+        """Find bounding boxes and process them into Block objects asynchronously."""
+        if self.page_img is None:
+            self.blocks = []
+            return
+
+        loop = asyncio.get_running_loop()
         try:
-            if self.page_img is None:
-                console.print(f"Warning: Page {self.page_num + 1} image is None, skipping block generation.", style="warning")
-                return
+            # Find bounding boxes (CPU-bound image processing)
+            # Pass the console object from the parent PDF
+            bboxes = await loop.run_in_executor(
+                self.executor, Utils.find_content_blocks, self.page_img, self.np, self.cv2, self.parent_pdf.console  # Pass console here
+            )
 
-            bboxes = self._get_bounding_boxes(self.page_img)
-            if not bboxes:
-                console.print(f"No content blocks found on page {self.page_num + 1}.", style="info")
-                return
+            # Process each bounding box, passing block_task_id
+            block_tasks = [self.process_single_block(bbox, self.page_img, block_task_id) for bbox in bboxes]
+            processed_blocks = await asyncio.gather(*block_tasks)
 
-            tasks = [self.process_single_block(bbox, self.page_img) for bbox in bboxes]
-            generated_blocks = await asyncio.gather(*tasks)
-            self.blocks = [block for block in generated_blocks if block]
+            # Filter out None results from failed blocks
+            self.blocks = [block for block in processed_blocks if block is not None]
+            del processed_blocks  # Clean up list
+            gc.collect()
 
         except Exception as e:
-            if not isinstance(e, TypeError) or "Block.__init__" not in str(e):
-                console.print(f"Error during block generation setup for page {self.page_num + 1}: {e}", style="danger")
-                traceback.print_exc()
-            raise
+            console.print(f"Error generating blocks for page {self.page_num}: {e}", style="danger")
+            self.blocks = []  # Ensure blocks is empty on error
 
     async def async_generate_latex(self):
-        """Asynchronously generate LaTeX content for the page."""
-        content = []
+        """Generate LaTeX list for all blocks on this page."""
+        page_content = []
         for block in self.blocks:
-            content.extend(block.generate_latex())
-        return content + [
-            Command('par'),
-            Command('vspace', arguments=['10pt'])
-        ]
+            try:
+                latex_items = block.generate_latex()  # This is synchronous CPU-bound
+                page_content.extend(latex_items)
+            except Exception as e:
+                console.print(f"Error generating LaTeX for block on page {self.page_num}: {e}", style="danger")
+        return page_content
 
     def _load_page_image(self):
         """Returns the page image that was already loaded during PDF processing."""

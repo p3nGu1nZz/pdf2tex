@@ -13,17 +13,17 @@ from .ui import console  # Import console from ui
 class Block:
     """Represents a content block within a Page (text or figure)."""
 
-    def __init__(self, bbox, parent_page, np_module, reader_instance, cv2_module):
-        """Initialize a block with its bounding box, parent page, and dependencies."""
+    def __init__(self, bbox, parent_page, np_module, cv2_module, block_type_str, content_string):
+        """Initialize a block with its bounding box, parent page, type, content, and dependencies."""
         self.parent_page = parent_page
         self.bbox = bbox
         self.np = np_module
-        self.reader = reader_instance
         self.cv2 = cv2_module
         self.block = self._make_block(
             bbox, parent_page.page_img, parent_page.height
         )
-        self.block_type, self.content_string = self._determine_content()
+        self.block_type = 0 if block_type_str == "text" else 1
+        self.content_string = content_string if self.block_type == 0 else '--Block Type is Figure--'
 
     def _make_block(self, bbox, page_img=None, height=None):
         """Extract the block image from the page."""
@@ -46,64 +46,6 @@ class Block:
             style="warning"
         )
         return self.np.zeros((10, 10, 3), dtype=self.np.uint8)
-
-    def _determine_content(self):
-        """Determine if the block is text or figure using OCR."""
-        if self.reader is None:
-            console.print("Error: EasyOCR Reader not available in Block.", style="danger")
-            return (1, '--Block Type is Figure (OCR Not Loaded)--')
-        try:
-            if (
-                self.block is None
-                or self.block.size == 0
-                or self.block.shape[0] < 5
-                or self.block.shape[1] < 5
-            ):
-                return (1, '--Block Type is Figure (Too small)--')
-
-            results = self.reader.readtext(self.block, paragraph=True)
-
-            if results:
-                text_parts = [result[1] for result in results]
-                s = " ".join(text_parts)
-
-                if s and not s.isspace() and len(s) > 3:
-                    return (0, s)
-
-            return (1, '--Block Type is Figure--')
-
-        except Exception as e:  # pylint: disable=broad-except
-            console.print(f"Error during OCR processing: {e}", style="danger")
-            raise RuntimeError(f"OCR processing failed: {e}") from e
-
-    async def async_determine_content(self, block_img):
-        """Asynchronous version of determine_content for parallel processing."""
-        if self.reader is None:
-            console.print("Error: EasyOCR Reader not available in Block.", style="danger")
-            return (1, '--Block Type is Figure (OCR Not Loaded)--')
-        loop = asyncio.get_running_loop()
-        try:
-            if (
-                block_img is None or block_img.size == 0 or
-                block_img.shape[0] < 5 or block_img.shape[1] < 5
-            ):
-                return (1, '--Block Type is Figure (Too small)--')
-            results = await loop.run_in_executor(
-                None,
-                lambda: self.reader.readtext(block_img, paragraph=True)
-            )
-            if results:
-                text_parts = [result[1] for result in results]
-                s = " ".join(text_parts)
-                if s and not s.isspace() and len(s) > 3:
-                    return (0, s)
-            return (1, '--Block Type is Figure--')
-        except Exception as e:  # pylint: disable=broad-except
-            console.print(
-                f"Error during async OCR processing: {e}",
-                style="danger"
-            )
-            return (1, f'--Block Type is Figure (OCR Error: {str(e)})--')
 
     def generate_latex(self):
         """Generate LaTeX representation for this block."""

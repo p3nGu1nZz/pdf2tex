@@ -206,39 +206,45 @@ class Utils:
         """Make all the items of a lst a string"""
         return [str(i) for i in lst]
 
+    # Define a synchronous helper function for writing
     @staticmethod
-    async def async_write_all(filename, lst, console):
-        """Asynchronously write all strings in lst to filename"""
-        try:
-            async with asyncio.Lock():
-                # Ensure directory exists
-                os.makedirs(os.path.dirname(filename), exist_ok=True)
-                with open(filename, "w", encoding="utf-8") as f:
-                    for s in lst:
-                        f.write(s)
-                        f.write("\n")
-            if console:
-                console.print(f"Wrote {len(lst)} strings to {filename}", style="info")
-            return True
-        except Exception as e:  # pylint: disable=broad-except
-            if console:
-                console.print(f"Error writing to {filename}: {e}", style="danger")
-            return False
-
-    @staticmethod
-    def write_all(filename, content, console_instance=None):  # Accept console optionally
-        """Write content to a file, handling potential errors."""
-        _console = console_instance or console  # Use passed console or default
+    def _write_sync(filename, content, console_instance):
+        """Synchronously writes content to a file."""
         try:
             with open(filename, "w", encoding="utf-8") as f:
-                f.write("\n".join(content))
-            _console.print(
-                f"Successfully wrote {len(content)} lines to {filename}", style="success"
-            )
+                f.write(content)
+            return content.count('\n') + 1
         except (IOError, OSError) as e:
-            _console.print(f"Error writing file {filename}: {e}", style="danger")
-        except Exception as e:  # pylint: disable=broad-except
-            _console.print(f"Unexpected error writing file {filename}: {e}", style="danger")
+            # Use the passed console instance
+            console_instance.print(f"Error writing file {filename}: {e}", style="danger")
+            return 0
+
+    @staticmethod
+    async def async_write_all(filename, content, console_instance):
+        """Asynchronously write content to a file using a thread."""
+        # Pass the console instance to the synchronous function
+        lines_written = await asyncio.to_thread(Utils._write_sync, filename, content, console_instance)
+        return lines_written
+
+    @staticmethod
+    def write_all(filename, content, console_instance):
+        """Synchronously write content to a file."""
+        # Pass console instance for consistency
+        return Utils._write_sync(filename, content, console_instance)
+
+    @staticmethod
+    def stringify_latex_content(content_list):
+        """Recursively converts a list of LaTeX objects to a string."""
+        output = []
+        for item in content_list:
+            if hasattr(item, 'content'): # Environment
+                output.append(Utils.stringify_latex_content(item.content))
+            elif hasattr(item, 'text'): # Command or LatexText
+                output.append(item.text)
+            elif isinstance(item, str): # Plain string (should be LatexText ideally)
+                output.append(item)
+            # Add handling for other types if necessary
+        return '\n'.join(output)
 
     @staticmethod
     def create_latex_project_structure(base_path, pdf_name):
@@ -265,73 +271,112 @@ class Utils:
         }
 
     @staticmethod
-    async def extract_images_from_pdf(pdf_path, output_dir, executor, fitz_module, console):
-        """Extract complete images from a PDF file asynchronously."""
-        if fitz_module is None:
-            if console:
-                console.print("Error: PyMuPDF (fitz) not loaded.", style="danger")
-            return []
+    async def extract_images_from_pdf(pdf_path, output_dir, executor, fitz_module, console, progress=None, task_id=None):
+        """
+        Extract complete images from a PDF file asynchronously.
+        Updates rich progress bar if provided.
+        Returns a tuple: (success_flag, list_of_extracted_image_paths).
+        """
         loop = asyncio.get_running_loop()
-        # Ensure output_dir is absolute or relative to cwd before safe_join
-        if not os.path.isabs(output_dir):
-            output_dir = os.path.join(os.getcwd(), output_dir)
-        safe_output_dir = output_dir
-        os.makedirs(safe_output_dir, exist_ok=True)  # Ensure it exists
+        safe_output_dir = os.path.abspath(output_dir)
+        os.makedirs(safe_output_dir, exist_ok=True)
+        pdf_name_base = Utils.get_file_name(pdf_path)
 
         def _extract_images():
             extracted_images = []
+            doc = None # Initialize doc to None
+            success_flag = False # Track success within the sync function
+            img_count = 0 # Initialize image count
             try:
+                if progress and task_id is not None:
+                    progress.start_task(task_id) # Explicitly start the task
+                    progress.update(task_id, description=f"[cyan]Opening {pdf_name_base}...")
+
                 doc = fitz_module.open(pdf_path)
-                img_count = 0
+                num_pages = doc.page_count
+
+                if progress and task_id is not None:
+                    # Update total based on pages for more granular progress
+                    progress.update(task_id, total=num_pages, description=f"[cyan]Extracting {pdf_name_base}...")
 
                 for page_num, page in enumerate(doc):
+                    if progress and task_id is not None:
+                         # Update description without advancing here, advance happens after processing
+                         progress.update(task_id, description=f"[cyan]Extracting {pdf_name_base} (Page {page_num+1}/{num_pages})...")
+
                     image_list = page.get_images(full=True)
                     for img_index, img_info in enumerate(image_list):
                         xref = img_info[0]
-                        try:
-                            base_image = doc.extract_image(xref)
-                            if base_image and base_image["image"]:
-                                image_ext = base_image["ext"]
-                                image_bytes = base_image["image"]
-                                img_filename = (
-                                    f"embedded_image_p{page_num+1}_{img_index}.{image_ext}"
-                                )
-                                img_path = Utils.safe_join(safe_output_dir, img_filename)
-                                with open(img_path, "wb") as img_file:
-                                    img_file.write(image_bytes)
-                                extracted_images.append(img_path)
-                                img_count += 1
-                        except Exception as img_extract_error:  # pylint: disable=broad-except
-                            if console:
-                                console.print(
-                                    f"Error extracting image xref {xref} on page {page_num+1}: {img_extract_error}",
-                                    style="warning",
-                                )
-                doc.close()
-                return extracted_images
-            except (FileNotFoundError, PermissionError) as file_error:
-                if console:
-                    console.print(
-                        f"Error opening or accessing PDF {pdf_path}: {file_error}",
-                        style="danger",
-                    )
-                return []
-            except fitz_module.fitz.FitzError as fitz_error:
-                if console:
-                    console.print(
-                        f"Fitz error processing PDF {pdf_path}: {fitz_error}",
-                        style="danger",
-                    )
-                return []
-            except Exception as e:  # pylint: disable=broad-except
-                if console:
-                    console.print(
-                        f"Unexpected error extracting images from PDF {pdf_path}: {e}",
-                        style="danger",
-                    )
-                return []
+                        base_image = doc.extract_image(xref)
+                        image_bytes = base_image["image"]
+                        image_ext = base_image["ext"]
+                        img_filename = f"{pdf_name_base}_page{page_num + 1}_img{img_index}.{image_ext}"
+                        img_path = Utils.safe_join(safe_output_dir, img_filename)
 
-        return await loop.run_in_executor(executor, _extract_images)
+                        try:
+                            with open(img_path, "wb") as img_file:
+                                img_file.write(image_bytes)
+                            extracted_images.append(img_path)
+                            img_count += 1
+                        except (IOError, OSError) as write_error:
+                            console.print(f"Error writing image {img_filename}: {write_error}", style="danger")
+
+                    if progress and task_id is not None:
+                        # Advance per page after processing it
+                        progress.update(task_id, advance=1)
+
+                success_flag = True # Mark as success if loop completes without error
+                return success_flag, extracted_images, img_count # Return img_count too
+
+            except (FileNotFoundError, PermissionError, fitz_module.fitz.FitzError, Exception) as e:
+                console.print(f"Error during image extraction for {pdf_path}: {e}", style="danger")
+                if progress and task_id is not None:
+                    # Ensure task is started before updating description on error
+                    if not progress.tasks[task_id].started:
+                        progress.start_task(task_id)
+                    progress.update(task_id, description=f"[red]Failed {pdf_name_base}", completed=0, total=1) # Mark as failed
+                success_flag = False
+                return success_flag, [], 0 # Return failure and 0 count
+            finally:
+                if doc:
+                    doc.close()
+                # Ensure task is marked completed and stopped
+                if progress and task_id is not None:
+                    task = progress.tasks[task_id]
+                    if not task.finished:
+                        # Ensure completion value matches total, especially if total changed
+                        progress.update(task_id, completed=task.total)
+                    # Stop the task to freeze the animation and finalize time
+                    progress.stop_task(task_id)
+
+
+        # Run the synchronous extraction function in the executor
+        success, image_paths, count = await loop.run_in_executor(executor, _extract_images)
+
+        # Optionally print summary here if needed, or rely on main.py summary
+        # if console and success:
+        #    console.print(f"Extracted {count} embedded images from {os.path.basename(pdf_path)}.", style="info")
+
+        return success, image_paths
+
+    @staticmethod
+    async def _extract_images_for_pdf(pdf_path, base_output_dir, executor, fitz_module, console_instance, progress, task_id):
+        """Helper coroutine for Phase 1: Extracts images for a single PDF."""
+        pdf_name = Utils.get_file_name(pdf_path)
+        project_paths = Utils.create_latex_project_structure(base_output_dir, pdf_name)
+        build_dir = project_paths["build_dir"]
+        temp_asset_folder = Utils.safe_join(build_dir, "assets")
+        os.makedirs(temp_asset_folder, exist_ok=True)
+
+        # Description update is handled within extract_images_from_pdf now
+
+        success, image_paths = await Utils.extract_images_from_pdf(
+            pdf_path, temp_asset_folder, executor, fitz_module, console_instance, progress, task_id # Pass progress/task_id
+        )
+        # Final status description (success/fail) is also handled within extract_images_from_pdf
+
+        # Return project_dir needed for Phase 2/3
+        return pdf_path, project_paths["project_dir"], success, image_paths
 
     @staticmethod
     def segment(img, cv2_module, np_module, console, BBox_class=BBox):  # Add BBox_class default
@@ -427,10 +472,25 @@ class Utils:
         return bboxes
 
     @staticmethod
-    def find_content_blocks(img, cv2_module, np_module, console, BBox_class=BBox):  # Add BBox_class default
-        """Find all content blocks in page."""
-        segmented_bboxes = Utils.segment(img, cv2_module, np_module, console, BBox_class)
-        return Utils.process_bboxes(segmented_bboxes)
+    def find_content_blocks(image, np_module, cv2_module, console):
+        """
+        Find content blocks (like paragraphs or figures) in a page image.
+        Returns a list of BBox objects.
+        """
+        try:
+            gray = cv2_module.cvtColor(image, cv2_module.COLOR_BGR2GRAY)
+            contours, _ = cv2_module.findContours(
+                gray, cv2_module.RETR_EXTERNAL, cv2_module.CHAIN_APPROX_SIMPLE
+            )
+            bboxes = []
+            for cnt in contours:
+                x, y, w, h = cv2_module.boundingRect(cnt)
+                if w > MIN_TEXT_SIZE and h > MIN_TEXT_SIZE:
+                    bboxes.append(BBox(x, y, w, h))
+            return bboxes
+        except Exception as e:
+            console.print(f"Error during content block detection: {e}", style="danger")
+            return []
 
     @staticmethod
     def extract_block_image(bbox, page_img, page_height, np_module, console):
