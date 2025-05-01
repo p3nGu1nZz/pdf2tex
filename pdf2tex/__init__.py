@@ -11,7 +11,7 @@ import click
 
 __version__ = "0.1.2"
 
-# Import main functions/classes
+# Import main functions/classes needed by CLI or public API
 from .main import (
     convert,
     async_convert,
@@ -49,6 +49,7 @@ __all__ = [
     "BBox",
     "Utils",
     "console",
+    "main_cli",
 ]
 
 
@@ -88,50 +89,67 @@ def convert_pdfs_in_directory(directory_path, output_dir=".", data="data"):
 
 @click.command(context_settings=dict(help_option_names=["-h", "--help"]))
 @click.option(
-    "--file", "-f", type=click.Path(exists=True),
+    "--file", "-f", type=click.Path(exists=True, dir_okay=False, resolve_path=True),
     help="Path to the PDF file to convert."
 )
 @click.option(
-    "--path", "-p", type=click.Path(exists=True),
+    "--path", "-p", type=click.Path(exists=True, file_okay=False, resolve_path=True),
     help="Path to the directory containing PDFs to convert."
 )
 @click.option(
-    "--output", "-o", type=click.Path(), default=".", show_default=True,
+    "--output", "-o", type=click.Path(resolve_path=True), default=".", show_default=True,
     help="Output directory for generated LaTeX projects."
 )
 @click.option(
-    "--data", "-d", type=click.Path(), default=DEFAULT_DATA_FOLDER, show_default=True,
-    help="Directory for storing intermediate files."
+    "--data", "-d", type=click.Path(resolve_path=True), default=DEFAULT_DATA_FOLDER, show_default=True,
+    help="Directory for storing intermediate files (build artifacts)."
+)
+@click.option(
+    "--max-workers", type=int, default=1, show_default=True,
+    help="Max workers for OCR/content processing (Phase 2)."
+)
+@click.option(
+    "--image-workers", type=int, default=4, show_default=True,
+    help="Max workers for image extraction (Phase 1)."
 )
 @click.version_option(version=__version__, message="PDF2Tex %(version)s")
-def main_cli(file, path, output, data):
+def main_cli(file, path, output, data, max_workers, image_workers):
     """
     PDF2TEX - Convert PDF files to LaTeX format.
 
-    This tool extracts text using OCR and treats non-textual elements as figures.
-    It processes files in parallel using asyncio for improved performance.
+    This tool extracts text using OCR (EasyOCR) and identifies/extracts images
+    from PDF documents, generating structured LaTeX projects.
+
+    It processes files asynchronously in three phases:
+    1. Image Extraction (using --image-workers)
+    2. Content Processing (OCR, using --max-workers)
+    3. LaTeX File Assembly
+
+    Specify either a single --file or a --path containing multiple PDFs.
     """
-    if "--help" not in sys.argv and "-h" not in sys.argv:
+    # Load dependencies only if not asking for help/version
+    if not any(arg in sys.argv for arg in ["--help", "-h", "--version"]):
         _ensure_dependencies_loaded()
 
     if not file and not path:
-        console.print("Error: Please provide either --file or --path option.", style="danger")
-        console.print("Use --help to see usage information.", style="info")
+        console.print("Error: Please provide either a --file or a --path option.", style="danger")
+        ctx = click.get_current_context()
+        console.print(ctx.get_help())
         sys.exit(1)
 
-    if data:
-        os.makedirs(data, exist_ok=True)
+    # Ensure data directory exists
+    os.makedirs(data, exist_ok=True)
 
-    project_output_dir = output if output != "." else Utils.safe_join(os.getcwd(), data)
+    # Determine actual output directory
+    project_output_dir = output
     os.makedirs(project_output_dir, exist_ok=True)
 
     console.print(f"Using output directory: {project_output_dir}", style="info")
 
-    from .main import convert  # Local import to avoid circular dependencies
-    if path:
-        convert(path, project_output_dir, data)
-    elif file:
-        convert(file, project_output_dir, data)
+    source_to_process = file if file else path
+
+    # Call the main conversion function with all arguments
+    convert(source_to_process, project_output_dir, data, max_workers, image_workers)
 
 
 if __name__ == "__main__":

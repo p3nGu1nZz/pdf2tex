@@ -2,20 +2,19 @@
 # pylint: disable=no-member
 # pylint: disable=import-outside-toplevel, global-statement
 """
-PDF to LaTeX Converter
+Core conversion logic for PDF to LaTeX.
 
-This script converts PDF files to LaTeX format by extracting text using OCR
-and handling non-textual elements as figures.
-Uses asyncio and ThreadPoolExecutor for parallel processing.
+Contains the async_convert and convert functions, along with helper
+coroutines for different phases of the conversion process.
 """
 
 import os
 import sys
 import asyncio
 import concurrent.futures
-import time  # For timing phases
-import traceback  # Import traceback
-import gc  # Import garbage collector
+import time
+import traceback
+import gc
 
 from rich.progress import Progress
 
@@ -27,9 +26,7 @@ from .ui import console, progress_columns, custom_theme
 from .constants import (
     DEFAULT_DATA_FOLDER,
     MIN_TEXT_SIZE,
-    HORIZONTAL_POOLING,
-    MAX_WORKERS,
-    IMAGE_EXTRACTION_WORKERS
+    HORIZONTAL_POOLING
 )
 
 # --- Globals that will be initialized later ---
@@ -150,7 +147,7 @@ async def _extract_images_for_pdf(pdf_path, base_output_dir, executor, fitz_modu
     return pdf_path, project_paths["project_dir"], success, image_paths
 
 
-async def _process_pdf_content(pdf_path, project_dir, image_paths, gpu_executor, gpu_semaphore, data_folder, progress, page_task_id, block_task_id):
+async def _process_pdf_content(pdf_path, project_dir, image_paths, gpu_executor, gpu_semaphore, data_folder, progress, page_task_id):
     """Helper coroutine for Phase 2: Processes content and generates LaTeX."""
     pdf_name = Utils.get_file_name(pdf_path)
     pdf = None
@@ -161,8 +158,7 @@ async def _process_pdf_content(pdf_path, project_dir, image_paths, gpu_executor,
             data_folder=data_folder,
             output_dir=os.path.dirname(project_dir),
             progress=progress,
-            page_task_id=page_task_id,
-            block_task_id=block_task_id
+            page_task_id=page_task_id
         )
         if not pdf or not pdf.pages:
             console.print(f"[Phase 2] Failed to initialize or find pages for {pdf_name}", style="danger")
@@ -196,7 +192,7 @@ async def _assemble_latex_file(project_dir, pdf_name, content_list, progress, as
         return False
 
 
-async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER):
+async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER, max_workers=1, image_workers=4):
     """Asynchronously convert PDF(s) using a three-phase approach with progress bars."""
     _ensure_dependencies_loaded()
     start_time = time.monotonic()
@@ -233,7 +229,7 @@ async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER):
 
         phase1_task_id = progress.add_task("[bold cyan]Phase 1: Extracting Images...", total=len(pdf_paths_to_process))
         phase1_start_time = time.monotonic()
-        image_executor = concurrent.futures.ThreadPoolExecutor(max_workers=IMAGE_EXTRACTION_WORKERS, thread_name_prefix='ImgExtract')
+        image_executor = concurrent.futures.ThreadPoolExecutor(max_workers=image_workers, thread_name_prefix='ImgExtract')
         extraction_tasks = []
         pdf_extraction_task_ids = {}
 
@@ -282,20 +278,17 @@ async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER):
 
         phase2_pages_task_id = progress.add_task("[cyan]Processing Pages...", total=total_pages_to_process)
         phase2_start_time = time.monotonic()
-        gpu_semaphore = asyncio.Semaphore(MAX_WORKERS)
-        gpu_executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix='GPUWorker')
+        gpu_semaphore = asyncio.Semaphore(max_workers)
+        gpu_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='GPUWorker')
 
         processed_data_for_phase3 = []
         for pdf_path, project_dir, _, image_paths in successful_extractions:
-            phase2_blocks_task_id = progress.add_task(f"[yellow]Processing Blocks ({Utils.get_file_name(pdf_path)})...", start=False)
-            progress.update(phase2_docs_task_id, description=f"[bold magenta]Phase 2: Processing {Utils.get_file_name(pdf_path)}...")
-            progress.start_task(phase2_blocks_task_id)
+            current_pdf_name = Utils.get_file_name(pdf_path)
+            progress.update(phase2_docs_task_id, description=f"[bold magenta]Phase 2: Processing {current_pdf_name}...")
 
             success, _, pdf_name, generated_content = await _process_pdf_content(
-                pdf_path, project_dir, image_paths, gpu_executor, gpu_semaphore, data, progress, phase2_pages_task_id, phase2_blocks_task_id
+                pdf_path, project_dir, image_paths, gpu_executor, gpu_semaphore, data, progress, phase2_pages_task_id
             )
-
-            progress.stop_task(phase2_blocks_task_id)
 
             if success:
                 processed_data_for_phase3.append((project_dir, pdf_name, generated_content))
@@ -341,45 +334,10 @@ async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER):
     console.print(f"\nTotal Conversion Time: {total_duration:.2f}s", style="bold green")
 
 
-def convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER):
+def convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER, max_workers=1, image_workers=4):
     """Synchronously convert a PDF file or directory of PDF files to LaTeX."""
     try:
-        asyncio.run(async_convert(source_path, output_dir, data))
+        asyncio.run(async_convert(source_path, output_dir, data, max_workers, image_workers))
     except Exception as e:
         print_error(f"An top-level error occurred during conversion: {e}")
         console.print(traceback.format_exc(), style="dim")
-
-
-import click
-
-@click.command(context_settings=dict(help_option_names=["-h", "--help"]))
-@click.option(
-    "--file", "-f", type=click.Path(exists=True, dir_okay=False, resolve_path=True),
-    help="Path to the PDF file to convert."
-)
-@click.option(
-    "--path", "-p", type=click.Path(exists=True, file_okay=False, resolve_path=True),
-    help="Path to the directory containing PDFs to convert."
-)
-@click.option(
-    "--output", "-o", type=click.Path(resolve_path=True), default=".", show_default=True,
-    help="Output directory for generated LaTeX projects."
-)
-@click.option(
-    "--data", "-d", type=click.Path(resolve_path=True), default=DEFAULT_DATA_FOLDER, show_default=True,
-    help="Directory for storing intermediate files (build artifacts)."
-)
-def main_cli(file, path, output, data):
-    """Converts PDF files to LaTeX using OCR and image extraction."""
-    if file:
-        convert(file, output, data)
-    elif path:
-        convert(path, output, data)
-    else:
-        console.print("Error: Please provide either a --file or a --path.", style="danger")
-        ctx = click.get_current_context()
-        console.print(ctx.get_help())
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main_cli()

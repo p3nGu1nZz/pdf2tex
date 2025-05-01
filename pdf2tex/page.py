@@ -2,7 +2,7 @@
 
 import re
 import asyncio
-import traceback  # Import traceback
+import traceback  # Ensure traceback is imported
 import gc  # Import gc
 
 from .bbox import BBox
@@ -16,7 +16,7 @@ class Page:
     """Page object representing a PDF page containing Block objects."""
 
     def __init__(self, page_img, parent_pdf, np_module, cv2_module, reader_instance, executor, gpu_semaphore, page_num,
-                 progress=None, page_task_id=None, block_task_id=None):  # Add block_task_id
+                 progress=None, page_task_id=None):  # Remove block_task_id
         """Initialize a page with its image, parent PDF, and dependencies."""
         self.page_img = page_img
         self.parent_pdf = parent_pdf
@@ -32,7 +32,6 @@ class Page:
         # Store progress info if needed later
         self.progress = progress
         self.page_task_id = page_task_id
-        self.block_task_id = block_task_id  # Store block task id
 
     async def process_single_block(self, bbox, page_image, block_task_id):
         """Process a single bounding box to determine its content and create a Block."""
@@ -67,9 +66,8 @@ class Page:
 
             # --- Update block progress bar ---
             if self.progress and block_task_id is not None:
-                # Get current completed count before advancing
-                current_block_count = self.progress.tasks[block_task_id].completed + 1
-                self.progress.update(block_task_id, advance=1, description=f"[yellow]Processing Block {current_block_count} (Page {self.page_num})...")
+                # Advance the per-page block task
+                self.progress.update(block_task_id, advance=1)  # Description is set when task total is updated
 
             # Clean up intermediate strings
             del block_type_str, content_string
@@ -99,6 +97,21 @@ class Page:
                 self.executor, Utils.find_content_blocks, self.page_img, self.np, self.cv2, self.parent_pdf.console  # Pass console here
             )
 
+            num_blocks_found = len(bboxes)
+
+            # --- Update Block Task Total ---
+            if self.progress and block_task_id is not None:
+                if num_blocks_found > 0:
+                    self.progress.update(block_task_id, total=num_blocks_found, description=f"[yellow]Processing Blocks (Page {self.page_num})...")
+                else:
+                    # If no blocks, complete immediately and update description
+                    self.progress.update(block_task_id, total=1, completed=1, description=f"[yellow]No Blocks Found (Page {self.page_num})")
+            # --- End Update ---
+
+            if num_blocks_found == 0:
+                self.blocks = []
+                return  # No blocks to process
+
             # Process each bounding box, passing block_task_id
             block_tasks = [self.process_single_block(bbox, self.page_img, block_task_id) for bbox in bboxes]
             processed_blocks = await asyncio.gather(*block_tasks)
@@ -110,7 +123,12 @@ class Page:
 
         except Exception as e:
             console.print(f"Error generating blocks for page {self.page_num}: {e}", style="danger")
+            console.print(traceback.format_exc(), style="dim")
             self.blocks = []  # Ensure blocks is empty on error
+            # Ensure progress bar is handled even on error finding blocks
+            if self.progress and block_task_id is not None:
+                if not self.progress.tasks[block_task_id].finished:
+                    self.progress.update(block_task_id, total=1, completed=1, description=f"[red]Block Gen Error (Page {self.page_num})")
 
     async def async_generate_latex(self):
         """Generate LaTeX list for all blocks on this page."""

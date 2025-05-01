@@ -2,7 +2,8 @@
 
 import os
 import asyncio
-from .constants import DEFAULT_DATA_FOLDER, MAX_WORKERS
+import traceback
+from .constants import DEFAULT_DATA_FOLDER
 from .ui import console
 from .utils import Utils
 from .page import Page
@@ -15,7 +16,7 @@ class PDF:
     """PDF Object representing a PDF document containing Page objects."""
     def __init__(self, filepath, np_module, cv2_module, fitz_module, reader_instance, executor, console_instance, gpu_semaphore,
                  extracted_image_paths=None, data_folder=DEFAULT_DATA_FOLDER, output_dir='.',
-                 progress=None, page_task_id=None, block_task_id=None):
+                 progress=None, page_task_id=None):
         """Initialize a PDF object from a file path."""
         self.path = filepath
         self.name = Utils.get_file_name(filepath)
@@ -31,7 +32,6 @@ class PDF:
         # Store progress objects
         self.progress = progress
         self.page_task_id = page_task_id
-        self.block_task_id = block_task_id
 
         project_paths = Utils.create_latex_project_structure(output_dir, self.name)
         self.project_dir = project_paths["project_dir"]
@@ -51,11 +51,11 @@ class PDF:
     @classmethod
     async def async_init(cls, filepath, np_module, cv2_module, fitz_module, reader_instance, executor, console_instance, gpu_semaphore,
                          extracted_image_paths=None, data_folder=DEFAULT_DATA_FOLDER, output_dir='.',
-                         progress=None, page_task_id=None, block_task_id=None):
+                         progress=None, page_task_id=None):
         """Asynchronous initializer for PDF class."""
         instance = cls(filepath, np_module, cv2_module, fitz_module, reader_instance, executor, console_instance, gpu_semaphore,
                        extracted_image_paths, data_folder, output_dir,
-                       progress, page_task_id, block_task_id)
+                       progress, page_task_id)
 
         # Get page count first
         try:
@@ -121,8 +121,7 @@ class PDF:
                         gpu_semaphore=self.gpu_semaphore,
                         page_num=page_num + 1,
                         progress=self.progress,
-                        page_task_id=self.page_task_id,
-                        block_task_id=self.block_task_id
+                        page_task_id=self.page_task_id
                     )
                     pages_list.append(page_obj)
 
@@ -142,36 +141,35 @@ class PDF:
     async def async_generate_latex_content(self):
         """
         Asynchronously generates the list of LaTeX content items for the PDF.
-        Does NOT wrap in document environment or write file.
-        Updates progress bar for block generation.
+        Manages a per-page block progress bar.
         """
         content = []
+        block_task_id = None
 
-        # Update progress description
-        if self.progress and self.page_task_id is not None:
-            self.progress.update(self.page_task_id, description=f"[cyan]Generating Blocks ({self.name})...")
+        for page in self.pages:
+            # --- Manage Block Progress Bar Per Page ---
+            if self.progress:
+                # Add a new task for this page's blocks, initially indeterminate
+                block_task_id = self.progress.add_task(f"[yellow]Finding Blocks (Page {page.page_num})...", total=None, start=True)
 
-        # Generate blocks for all pages first
-        block_gen_tasks = [page.async_generate_blocks(self.block_task_id) for page in self.pages]
-        if block_gen_tasks:
-            await asyncio.gather(*block_gen_tasks)
-        else:
-            self.console.print(f"No pages found or processed for {self.name} to generate blocks.", style="warning")
+            try:
+                # Generate blocks for the current page, passing the new task ID
+                await page.async_generate_blocks(block_task_id)
 
-        # Update progress description
-        if self.progress and self.page_task_id is not None:
-            self.progress.update(self.page_task_id, description=f"[cyan]Generating LaTeX ({self.name})...")
+                # Generate LaTeX from the blocks on the current page
+                page_content = await page.async_generate_latex()
+                content.extend(page_content)
 
-        # Generate LaTeX from the blocks on each page
-        latex_gen_tasks = [page.async_generate_latex() for page in self.pages]
-        if latex_gen_tasks:
-            results = await asyncio.gather(*latex_gen_tasks)
-        else:
-            self.console.print(f"No pages found or processed for {self.name} to generate LaTeX.", style="warning")
-            results = []
-
-        for page_content in results:
-            content.extend(page_content)
+            except Exception as e:
+                self.console.print(f"Error processing page {page.page_num} content: {e}", style="danger")
+                self.console.print(traceback.format_exc(), style="dim")
+            finally:
+                # Stop and remove the block task for this page, regardless of success
+                if self.progress and block_task_id is not None:
+                    self.progress.stop_task(block_task_id)
+                    self.progress.remove_task(block_task_id)
+                block_task_id = None
+            # --- End Block Progress Bar Management ---
 
         # Add EMBEDDED images (extracted in Phase 1)
         if self.embedded_images:

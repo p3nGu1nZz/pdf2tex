@@ -4,5 +4,3 @@
 DEFAULT_DATA_FOLDER = "data"
 MIN_TEXT_SIZE = 10
 HORIZONTAL_POOLING = 25
-MAX_WORKERS = 1 # Default number of workers for thread pool
-IMAGE_EXTRACTION_WORKERS = 4 # Number of workers for image extraction phase
