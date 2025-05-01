@@ -39,9 +39,13 @@ class TexFile:
     # Helper for the less preferred synchronous path
     def _generate_sync_content(self, pdf_obj):
         content = []
+        batch_size = 8  # Adjust based on your GPU
         for page in pdf_obj.pages:
-            for block in page.blocks:
-                content.extend(block.generate_latex())
+            for i in range(0, len(page.blocks), batch_size):
+                batch = page.blocks[i:i+batch_size]
+                # Process batch of blocks simultaneously
+                for block in batch:
+                    content.extend(block.generate_latex())
         # Add embedded images synchronously if needed (logic similar to PDF.async_generate_latex_content)
         return content
 

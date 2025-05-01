@@ -15,6 +15,8 @@ import concurrent.futures
 import time
 import traceback
 import gc
+import importlib
+import shutil
 
 from rich.progress import Progress
 
@@ -38,29 +40,34 @@ NP = None
 TORCH = None
 EASYOCR = None
 IS_LOADED = False
+BATCH_SIZE = None
 
 # Ensure TORCH is imported if not already
 try:
-    import torch as TORCH
+    import torch as torch_module
 except ImportError:
     TORCH = None  # Handle case where torch might not be installed initially
 
 # --- Dependency Loading Function ---
-def _ensure_dependencies_loaded():
+def _ensure_dependencies_loaded(batch_size=16, quantize=True):
     """Loads heavy dependencies and initializes READER if not already done."""
-    global READER, CV2, FITZ, PLT, NP, TORCH, EASYOCR, IS_LOADED
+    global READER, CV2, FITZ, PLT, NP, TORCH, EASYOCR, IS_LOADED, BATCH_SIZE
 
+    # Store batch size globally so it can be accessed throughout the module
+    BATCH_SIZE = batch_size
+    
     # Skip if already loaded
     if IS_LOADED:
         return
 
     try:
-        import cv2 as cv2_module
-        import fitz as fitz_module
-        import matplotlib.pyplot as plt_module
-        import numpy as np_module
-        import torch as torch_module
-        import easyocr as easyocr_module
+        # Dynamically import heavy libraries
+        cv2_module = importlib.import_module("cv2")
+        fitz_module = importlib.import_module("fitz")
+        plt_module = importlib.import_module("matplotlib.pyplot")
+        np_module = importlib.import_module("numpy")
+        torch_module = importlib.import_module("torch")
+        easyocr_module = importlib.import_module("easyocr")
 
         CV2 = cv2_module
         FITZ = fitz_module
@@ -69,15 +76,20 @@ def _ensure_dependencies_loaded():
         TORCH = torch_module
         EASYOCR = easyocr_module
 
-        # Set torch num_threads to 1 to avoid oversubscription
-        TORCH.set_num_threads(1)
+        # Set torch num_threads to match number of physical cores
+        cpu_threads = max(2, os.cpu_count() // 2)  # A reasonable default
+        TORCH.set_num_threads(cpu_threads)  # Increased from 1
 
-        # Disable CUDA multi-threading if using GPU
+        # Improve CUDA performance
         if TORCH.cuda.is_available():
             TORCH.cuda.set_device(0)
+            TORCH.backends.cudnn.benchmark = True  # Enable benchmark mode
 
         console.print("Initializing EasyOCR Reader...", style="info")
-        READER = EASYOCR.Reader(['en'], gpu=TORCH.cuda.is_available(), quantize=True)
+        console.print(f"Using batch size: {batch_size}, quantize: {quantize}", style="info")
+        
+        # Use the quantize parameter
+        READER = EASYOCR.Reader(['en'], gpu=TORCH.cuda.is_available(), quantize=quantize)
 
         # Call flatten_parameters on LSTM modules to fix the warning
         _flatten_lstm_parameters(READER)
@@ -147,54 +159,127 @@ async def _extract_images_for_pdf(pdf_path, base_output_dir, executor, fitz_modu
     return pdf_path, project_paths["project_dir"], success, image_paths
 
 
-async def _process_pdf_content(pdf_path, project_dir, image_paths, gpu_executor, gpu_semaphore, data_folder, progress, page_task_id):
-    """Helper coroutine for Phase 2: Processes content and generates LaTeX."""
+async def _process_pdf_content(pdf_path, project_dir, image_paths, gpu_executor, gpu_semaphore, data_folder,
+                             progress, page_task_id, batch_size=16):  # Add batch_size parameter
+    """
+    Helper coroutine for Phase 2: Processes content.
+    Returns tuple: (success_flag, project_dir, pdf_name, body_content_list, bibtex_string_list)
+    """
     pdf_name = Utils.get_file_name(pdf_path)
     pdf = None
+    body_content = []
+    bibtex_entries = []
     try:
-        pdf = await PDF.async_init(
-            pdf_path, NP, CV2, FITZ, READER, gpu_executor, console, gpu_semaphore,
-            extracted_image_paths=image_paths,
-            data_folder=data_folder,
-            output_dir=os.path.dirname(project_dir),
-            progress=progress,
-            page_task_id=page_task_id
-        )
-        if not pdf or not pdf.pages:
-            console.print(f"[Phase 2] Failed to initialize or find pages for {pdf_name}", style="danger")
-            return False, project_dir, pdf_name, []
+        await gpu_semaphore.acquire()
+        try:
+            pdf = await PDF.async_init(
+                pdf_path, NP, CV2, FITZ, READER, gpu_executor, console, gpu_semaphore,
+                extracted_image_paths=image_paths,
+                data_folder=data_folder,
+                output_dir=project_dir,
+                progress=progress,
+                page_task_id=page_task_id,
+                batch_size=batch_size  # Pass batch_size to PDF
+            )
+            if not pdf:
+                console.print(f"[Phase 2] Failed to initialize PDF object for {pdf_name}", style="danger")
+                return False, project_dir, pdf_name, [], []
 
-        generated_content = await pdf.async_generate_latex_content()
+            body_content, bibtex_entries = await pdf.async_generate_latex_content()
 
-        return True, project_dir, pdf_name, generated_content
+            return True, project_dir, pdf_name, body_content, bibtex_entries
+        finally:
+            gpu_semaphore.release()
 
     except Exception as e:
         console.print(f"[Phase 2] Error processing content for {pdf_name}: {e}", style="danger")
         console.print(traceback.format_exc(), style="dim")
         if pdf and pdf.num_pages > 0 and progress and page_task_id is not None:
-            task = progress.tasks[page_task_id]
-            remaining_pages = pdf.num_pages
-            progress.update(page_task_id, advance=remaining_pages, description="[red]Page processing error")
-        return False, project_dir, pdf_name, []
+            try:
+                pass
+            except Exception:
+                pass
+        return False, project_dir, pdf_name, [], []
 
 
-async def _assemble_latex_file(project_dir, pdf_name, content_list, progress, assembly_task_id):
-    """Helper coroutine for Phase 3: Assembles and writes the .tex file."""
+async def _assemble_latex_file(project_dir, pdf_name, body_content_list, bibtex_string_list, console_instance, progress, task_id):
+    """
+    Helper coroutine for Phase 3: Assembles main.tex, body.tex, and references.bib.
+    """
+    success = False
+    lines_written_main = 0
+    lines_written_body = 0
+    lines_written_bib = 0
+
+    main_tex_path = Utils.safe_join(project_dir, "main.tex")
+    body_tex_path = Utils.safe_join(project_dir, "body.tex")
+    bib_path = Utils.safe_join(project_dir, "references.bib")
+
     try:
-        progress.update(assembly_task_id, description=f"[yellow]Assembling {pdf_name}.tex...")
-        tex_file = await TexFile.async_init(content_list=content_list, project_dir=project_dir, name=pdf_name)
-        await tex_file.async_generate_tex_file()
-        progress.update(assembly_task_id, advance=1, description=f"[yellow]Assembling {pdf_name}.tex... Done")
-        return True
+        main_content = f"""\\documentclass{{article}}
+\\usepackage{{graphicx}} % Required for including images
+\\usepackage{{amsmath}} % For math environments
+\\usepackage{{geometry}} % For page layout adjustments
+\\usepackage[utf8]{{inputenc}} % Input encoding
+\\usepackage[T1]{{fontenc}} % Font encoding
+\\usepackage{{float}} % For [H] placement specifier
+\\usepackage{{hyperref}} % For clickable links (optional)
+
+\\graphicspath{{{{./assets/}}}} % Tell LaTeX where to find images
+
+\\title{{{Utils.escape_special_chars(pdf_name)}}}
+\\author{{Generated by PDF2Tex}}
+\\date{{\\today}}
+
+\\begin{{document}}
+
+\\maketitle
+
+\\input{{{os.path.basename(body_tex_path)}}} % Input the body content
+
+\\clearpage % Ensure bibliography starts on a new page
+
+\\bibliographystyle{{plain}} % Choose a bibliography style (e.g., plain, unsrt, alpha)
+\\bibliography{{{os.path.splitext(os.path.basename(bib_path))[0]}}} % Reference the .bib file (without extension)
+
+\\end{{document}}
+"""
+        body_string = "\n".join(map(str, body_content_list))
+
+        from pdf2tex.references import ReferenceExtractor
+        bib_string = ReferenceExtractor.merge_bibtex_entries(bibtex_string_list)
+
+        write_tasks = [
+            Utils.async_write_all(main_tex_path, main_content, console_instance),
+            Utils.async_write_all(body_tex_path, body_string, console_instance),
+            Utils.async_write_all(bib_path, bib_string, console_instance)
+        ]
+        results = await asyncio.gather(*write_tasks)
+        lines_written_main, lines_written_body, lines_written_bib = results
+
+        if lines_written_main > 0 and lines_written_body >= 0 and lines_written_bib >= 0:
+            console_instance.print(f"Wrote {lines_written_main} lines to {main_tex_path}")
+            console_instance.print(f"Wrote {lines_written_body} lines to {body_tex_path}")
+            console_instance.print(f"Wrote {lines_written_bib} lines to {bib_path}")
+            success = True
+        else:
+            console_instance.print(f"Failed to write one or more LaTeX files for {pdf_name}", style="danger")
+
     except Exception as e:
-        console.print(f"[Phase 3] Error assembling file for {pdf_name}: {e}", style="danger")
-        progress.update(assembly_task_id, description=f"[red]Assembly failed {pdf_name}")
-        return False
+        console_instance.print(f"Error assembling LaTeX files for {pdf_name}: {e}", style="danger")
+        console_instance.print(traceback.format_exc(), style="dim")
+        success = False
+    finally:
+        if progress and task_id is not None:
+            progress.update(task_id, advance=1)
+
+    return success
 
 
-async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER, max_workers=1, image_workers=4):
+async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER, max_workers=1, image_workers=4, 
+                        batch_size=16, quantize=True):
     """Asynchronously convert PDF(s) using a three-phase approach with progress bars."""
-    _ensure_dependencies_loaded()
+    _ensure_dependencies_loaded(batch_size=batch_size, quantize=quantize)
     start_time = time.monotonic()
 
     pdf_paths_to_process = []
@@ -216,14 +301,13 @@ async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER, m
         console.print("No PDF files found to process.", style="warning")
         return
 
-    # Initialize variables to store summary counts
     successful_extractions_count = 0
     failed_extractions_count = 0
     successful_processing_count = 0
     failed_processing_count = 0
     assembly_success_count = 0
     failed_assembly_count = 0
-    total_pdfs_processed = len(pdf_paths_to_process)  # Store initial count
+    total_pdfs_processed = len(pdf_paths_to_process)
 
     with Progress(*progress_columns, console=console, transient=False) as progress:
 
@@ -246,15 +330,13 @@ async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER, m
 
         image_executor.shutdown(wait=True)
         progress.update(phase1_task_id, completed=len(pdf_paths_to_process), description="[bold green]Phase 1: Image Extraction Complete")
-        # Calculate counts but don't print yet
         successful_extractions = [res for res in extraction_results if res[2]]
         successful_extractions_count = len(successful_extractions)
         failed_extractions_count = total_pdfs_processed - successful_extractions_count
 
         if not successful_extractions:
-            # Print immediate exit message if needed
             console.print("No PDFs remaining after image extraction phase. Exiting.", style="warning")
-            return  # Exit before printing summaries
+            return
 
         phase2_docs_task_id = progress.add_task("[bold magenta]Phase 2: Processing Documents...", total=successful_extractions_count)
         total_pages_to_process = 0
@@ -262,17 +344,15 @@ async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER, m
         temp_doc = None
         console.print("Calculating total pages for progress...", style="info")
         for pdf_path, _, _, _ in successful_extractions:
-            temp_doc = None  # Initialize temp_doc for each iteration
+            temp_doc = None
             try:
-                # Open doc and get count within the try block
                 temp_doc = await asyncio.get_running_loop().run_in_executor(page_count_executor, FITZ.open, pdf_path)
                 total_pages_to_process += temp_doc.page_count
             except Exception as e:
                 console.print(f"Warning: Could not get page count for {pdf_path}: {e}", style="warning")
             finally:
-                # Close doc in the finally block, ensuring it happens after try
                 if temp_doc:
-                    await asyncio.get_running_loop().run_in_executor(page_count_executor, temp_doc.close)  # Close moved here
+                    await asyncio.get_running_loop().run_in_executor(page_count_executor, temp_doc.close)
         page_count_executor.shutdown(wait=True)
         console.print(f"Total pages to process: {total_pages_to_process}", style="info")
 
@@ -286,15 +366,16 @@ async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER, m
             current_pdf_name = Utils.get_file_name(pdf_path)
             progress.update(phase2_docs_task_id, description=f"[bold magenta]Phase 2: Processing {current_pdf_name}...")
 
-            success, _, pdf_name, generated_content = await _process_pdf_content(
-                pdf_path, project_dir, image_paths, gpu_executor, gpu_semaphore, data, progress, phase2_pages_task_id
+            success, _, pdf_name_ret, generated_body_content, generated_bib_entries = await _process_pdf_content(
+                pdf_path, project_dir, image_paths, gpu_executor, gpu_semaphore, data, 
+                progress, phase2_pages_task_id, batch_size  # Pass batch_size parameter
             )
 
             if success:
-                processed_data_for_phase3.append((project_dir, pdf_name, generated_content))
+                processed_data_for_phase3.append((project_dir, pdf_name_ret, generated_body_content, generated_bib_entries))
             progress.update(phase2_docs_task_id, advance=1)
 
-            del generated_content
+            del generated_body_content, generated_bib_entries
             gc.collect()
             if TORCH and TORCH.cuda.is_available():
                 TORCH.cuda.empty_cache()
@@ -302,29 +383,26 @@ async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER, m
         gpu_executor.shutdown(wait=True)
         progress.update(phase2_pages_task_id, completed=total_pages_to_process, description="[green]Page Processing Complete")
         progress.update(phase2_docs_task_id, description="[bold green]Phase 2: Document Processing Complete")
-        # Calculate counts but don't print yet
         successful_processing_count = len(processed_data_for_phase3)
         failed_processing_count = successful_extractions_count - successful_processing_count
 
         if not processed_data_for_phase3:
-            # Print immediate exit message if needed
             console.print("No documents successfully processed for content. Exiting.", style="warning")
-            return  # Exit before printing summaries
+            return
 
         phase3_task_id = progress.add_task("[bold yellow]Phase 3: Assembling LaTeX Files...", total=len(processed_data_for_phase3))
         phase3_start_time = time.monotonic()
-        for project_dir, pdf_name, content_list in processed_data_for_phase3:
-            success = await _assemble_latex_file(project_dir, pdf_name, content_list, progress, phase3_task_id)
-            if success:
-                assembly_success_count += 1
+        assembly_tasks = []
+        for proj_dir, pdf_name_ph3, body_content_ph3, bib_entries_ph3 in processed_data_for_phase3:
+            assembly_tasks.append(
+                _assemble_latex_file(proj_dir, pdf_name_ph3, body_content_ph3, bib_entries_ph3, console, progress, phase3_task_id)
+            )
+        assembly_results = await asyncio.gather(*assembly_tasks)
+        assembly_success_count = sum(assembly_results)
 
         progress.update(phase3_task_id, completed=len(processed_data_for_phase3), description="[bold green]Phase 3: LaTeX Assembly Complete")
-        # Calculate counts but don't print yet
         failed_assembly_count = len(processed_data_for_phase3) - assembly_success_count
 
-    # --- End of `with Progress` block ---
-
-    # Print summaries AFTER the progress bars are finished
     console.print(f"\n--- Summary ---", style="bold")
     console.print(f"Phase 1 (Image Extraction): {successful_extractions_count} succeeded, {failed_extractions_count} failed.", style="info")
     console.print(f"Phase 2 (Content Processing): {successful_processing_count} succeeded, {failed_processing_count} failed.", style="info")
@@ -334,10 +412,16 @@ async def async_convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER, m
     console.print(f"\nTotal Conversion Time: {total_duration:.2f}s", style="bold green")
 
 
-def convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER, max_workers=1, image_workers=4):
+def convert(source_path, output_dir='.', data=DEFAULT_DATA_FOLDER, max_workers=1, image_workers=4, 
+           batch_size=16, quantize=True):
     """Synchronously convert a PDF file or directory of PDF files to LaTeX."""
     try:
-        asyncio.run(async_convert(source_path, output_dir, data, max_workers, image_workers))
+        asyncio.run(async_convert(source_path, output_dir, data, max_workers, image_workers, 
+                                 batch_size, quantize))
     except Exception as e:
-        print_error(f"An top-level error occurred during conversion: {e}")
+        print_error(f"An unexpected error occurred during conversion: {e}")
         console.print(traceback.format_exc(), style="dim")
+        gc.collect()
+        if TORCH and TORCH.cuda.is_available():
+            TORCH.cuda.empty_cache()
+        sys.exit(1)

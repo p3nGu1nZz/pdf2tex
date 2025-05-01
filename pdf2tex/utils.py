@@ -6,6 +6,9 @@ These include safe path handling, image processing, and LaTeX project structure 
 import os
 import re
 import asyncio
+import traceback
+import numpy as np
+import cv2
 
 from .ui import console
 from .bbox import BBox
@@ -161,11 +164,25 @@ class Utils:
         """Extract filename without extension using regex."""
         filename = os.path.basename(path)
         filename = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", filename)
-        # Updated regex to handle trailing dots correctly
         match = re.match(r"^(.+?)(\.[^.]+)?$", filename.rstrip("."))
         if match:
             return match.group(1)
         return filename.rstrip(".")  # Fallback for names without extensions
+
+    @staticmethod
+    def sanitize_filename(filename):
+        """
+        Sanitize a string to be suitable for use in filenames or LaTeX labels.
+        Removes or replaces potentially problematic characters.
+        """
+        if not isinstance(filename, str):
+            filename = str(filename)
+        base_name = os.path.splitext(filename)[0]
+        sanitized = re.sub(r"[^\w\-]+", "_", base_name)
+        sanitized = sanitized.strip("_")
+        if not sanitized:
+            return "sanitized_name"
+        return sanitized
 
     @staticmethod
     def escape_special_chars(s):
@@ -173,7 +190,6 @@ class Utils:
         if not isinstance(s, str):
             s = str(s)
 
-        # Process character by character instead of using string replace
         result = []
         for char in s:
             if char == "&":
@@ -206,30 +222,28 @@ class Utils:
         """Make all the items of a lst a string"""
         return [str(i) for i in lst]
 
-    # Define a synchronous helper function for writing
     @staticmethod
     def _write_sync(filename, content, console_instance):
         """Synchronously writes content to a file."""
         try:
             with open(filename, "w", encoding="utf-8") as f:
                 f.write(content)
-            return content.count('\n') + 1
+            return content.count("\n") + 1
         except (IOError, OSError) as e:
-            # Use the passed console instance
             console_instance.print(f"Error writing file {filename}: {e}", style="danger")
             return 0
 
     @staticmethod
     async def async_write_all(filename, content, console_instance):
         """Asynchronously write content to a file using a thread."""
-        # Pass the console instance to the synchronous function
-        lines_written = await asyncio.to_thread(Utils._write_sync, filename, content, console_instance)
+        lines_written = await asyncio.to_thread(
+            Utils._write_sync, filename, content, console_instance
+        )
         return lines_written
 
     @staticmethod
     def write_all(filename, content, console_instance):
         """Synchronously write content to a file."""
-        # Pass console instance for consistency
         return Utils._write_sync(filename, content, console_instance)
 
     @staticmethod
@@ -237,19 +251,25 @@ class Utils:
         """Recursively converts a list of LaTeX objects to a string."""
         output = []
         for item in content_list:
-            if hasattr(item, 'content'): # Environment
+            if hasattr(item, "content"):
                 output.append(Utils.stringify_latex_content(item.content))
-            elif hasattr(item, 'text'): # Command or LatexText
+            elif hasattr(item, "text"):
                 output.append(item.text)
-            elif isinstance(item, str): # Plain string (should be LatexText ideally)
+            elif isinstance(item, str):
                 output.append(item)
-            # Add handling for other types if necessary
-        return '\n'.join(output)
+        return "\n".join(output)
 
     @staticmethod
     def create_latex_project_structure(base_path, pdf_name):
-        """Create a proper LaTeX project directory structure."""
-        # If base_path is absolute, use it directly; else join with cwd
+        """
+        Create a standard LaTeX project directory structure:
+        - project_dir/
+          - main.tex
+          - body.tex
+          - references.bib
+          - assets/ (for images)
+          - build/ (for intermediate files)
+        """
         if os.path.isabs(base_path):
             safe_base = base_path
         else:
@@ -258,20 +278,28 @@ class Utils:
         project_dir = Utils.safe_join(safe_base, safe_pdf_name)
         os.makedirs(project_dir, exist_ok=True)
 
-        figures_dir = Utils.safe_join(project_dir, "figures")
-        os.makedirs(figures_dir, exist_ok=True)
-
+        assets_dir = Utils.safe_join(project_dir, "assets")
+        os.makedirs(assets_dir, exist_ok=True)
         build_dir = Utils.safe_join(project_dir, "build")
         os.makedirs(build_dir, exist_ok=True)
 
+        main_tex_path = Utils.safe_join(project_dir, "main.tex")
+        body_tex_path = Utils.safe_join(project_dir, "body.tex")
+        bib_path = Utils.safe_join(project_dir, "references.bib")
+
         return {
             "project_dir": project_dir,
-            "figures_dir": figures_dir,
+            "main_tex_path": main_tex_path,
+            "body_tex_path": body_tex_path,
+            "bib_path": bib_path,
+            "assets_dir": assets_dir,
             "build_dir": build_dir,
         }
 
     @staticmethod
-    async def extract_images_from_pdf(pdf_path, output_dir, executor, fitz_module, console, progress=None, task_id=None):
+    async def extract_images_from_pdf(
+        pdf_path, output_dir, executor, fitz_module, console, progress=None, task_id=None
+    ):
         """
         Extract complete images from a PDF file asynchronously.
         Updates rich progress bar if provided.
@@ -284,25 +312,32 @@ class Utils:
 
         def _extract_images():
             extracted_images = []
-            doc = None # Initialize doc to None
-            success_flag = False # Track success within the sync function
-            img_count = 0 # Initialize image count
+            doc = None
+            success_flag = False
+            img_count = 0
             try:
                 if progress and task_id is not None:
-                    progress.start_task(task_id) # Explicitly start the task
-                    progress.update(task_id, description=f"[cyan]Opening {pdf_name_base}...")
+                    progress.start_task(task_id)
+                    progress.update(
+                        task_id, description=f"[cyan]Opening {pdf_name_base}..."
+                    )
 
                 doc = fitz_module.open(pdf_path)
                 num_pages = doc.page_count
 
                 if progress and task_id is not None:
-                    # Update total based on pages for more granular progress
-                    progress.update(task_id, total=num_pages, description=f"[cyan]Extracting {pdf_name_base}...")
+                    progress.update(
+                        task_id,
+                        total=num_pages,
+                        description=f"[cyan]Extracting {pdf_name_base}...",
+                    )
 
                 for page_num, page in enumerate(doc):
                     if progress and task_id is not None:
-                         # Update description without advancing here, advance happens after processing
-                         progress.update(task_id, description=f"[cyan]Extracting {pdf_name_base} (Page {page_num+1}/{num_pages})...")
+                        progress.update(
+                            task_id,
+                            description=f"[cyan]Extracting {pdf_name_base} (Page {page_num+1}/{num_pages})...",
+                        )
 
                     image_list = page.get_images(full=True)
                     for img_index, img_info in enumerate(image_list):
@@ -319,48 +354,62 @@ class Utils:
                             extracted_images.append(img_path)
                             img_count += 1
                         except (IOError, OSError) as write_error:
-                            console.print(f"Error writing image {img_filename}: {write_error}", style="danger")
+                            console.print(
+                                f"Error writing image {img_filename}: {write_error}",
+                                style="danger",
+                            )
 
                     if progress and task_id is not None:
-                        # Advance per page after processing it
                         progress.update(task_id, advance=1)
 
-                success_flag = True # Mark as success if loop completes without error
-                return success_flag, extracted_images, img_count # Return img_count too
+                success_flag = True
+                return success_flag, extracted_images, img_count
 
-            except (FileNotFoundError, PermissionError, fitz_module.fitz.FitzError, Exception) as e:
-                console.print(f"Error during image extraction for {pdf_path}: {e}", style="danger")
+            except (
+                FileNotFoundError,
+                PermissionError,
+                fitz_module.fitz.FitzError,
+                Exception,
+            ) as e:
+                console.print(
+                    f"Error during image extraction for {pdf_path}: {e}", style="danger"
+                )
                 if progress and task_id is not None:
-                    # Ensure task is started before updating description on error
                     if not progress.tasks[task_id].started:
                         progress.start_task(task_id)
-                    progress.update(task_id, description=f"[red]Failed {pdf_name_base}", completed=0, total=1) # Mark as failed
+                    progress.update(
+                        task_id,
+                        description=f"[red]Failed {pdf_name_base}",
+                        completed=0,
+                        total=1,
+                    )
                 success_flag = False
-                return success_flag, [], 0 # Return failure and 0 count
+                return success_flag, [], 0
             finally:
                 if doc:
                     doc.close()
-                # Ensure task is marked completed and stopped
                 if progress and task_id is not None:
                     task = progress.tasks[task_id]
                     if not task.finished:
-                        # Ensure completion value matches total, especially if total changed
                         progress.update(task_id, completed=task.total)
-                    # Stop the task to freeze the animation and finalize time
                     progress.stop_task(task_id)
 
-
-        # Run the synchronous extraction function in the executor
-        success, image_paths, count = await loop.run_in_executor(executor, _extract_images)
-
-        # Optionally print summary here if needed, or rely on main.py summary
-        # if console and success:
-        #    console.print(f"Extracted {count} embedded images from {os.path.basename(pdf_path)}.", style="info")
+        success, image_paths, count = await loop.run_in_executor(
+            executor, _extract_images
+        )
 
         return success, image_paths
 
     @staticmethod
-    async def _extract_images_for_pdf(pdf_path, base_output_dir, executor, fitz_module, console_instance, progress, task_id):
+    async def _extract_images_for_pdf(
+        pdf_path,
+        base_output_dir,
+        executor,
+        fitz_module,
+        console_instance,
+        progress,
+        task_id,
+    ):
         """Helper coroutine for Phase 1: Extracts images for a single PDF."""
         pdf_name = Utils.get_file_name(pdf_path)
         project_paths = Utils.create_latex_project_structure(base_output_dir, pdf_name)
@@ -368,18 +417,20 @@ class Utils:
         temp_asset_folder = Utils.safe_join(build_dir, "assets")
         os.makedirs(temp_asset_folder, exist_ok=True)
 
-        # Description update is handled within extract_images_from_pdf now
-
         success, image_paths = await Utils.extract_images_from_pdf(
-            pdf_path, temp_asset_folder, executor, fitz_module, console_instance, progress, task_id # Pass progress/task_id
+            pdf_path,
+            temp_asset_folder,
+            executor,
+            fitz_module,
+            console_instance,
+            progress,
+            task_id,
         )
-        # Final status description (success/fail) is also handled within extract_images_from_pdf
 
-        # Return project_dir needed for Phase 2/3
         return pdf_path, project_paths["project_dir"], success, image_paths
 
     @staticmethod
-    def segment(img, cv2_module, np_module, console, BBox_class=BBox):  # Add BBox_class default
+    def segment(img, cv2_module, np_module, console, BBox_class=BBox):
         """Input: cv2 image of page. Output: BBox objects for content blocks."""
         if cv2_module is None:
             if console:
@@ -426,13 +477,13 @@ class Utils:
             for c in contours:
                 bx, by, bw, bh = cv2_module.boundingRect(c)
 
-                if bh < MIN_TEXT_SIZE or bw < MIN_TEXT_SIZE:  # Add width check
+                if bh < MIN_TEXT_SIZE or bw < MIN_TEXT_SIZE:
                     continue
 
                 block_slice = img[by : by + bh, bx : bx + bw]
                 if (
                     Utils.pct_white(block_slice, np_module, cv2_module, console) >= 0.99
-                ):  # Allow tiny non-white specks
+                ):
                     continue
 
                 bboxes.append(BBox_class(0, by, img_width, bh))
@@ -477,73 +528,86 @@ class Utils:
         Find content blocks (like paragraphs or figures) in a page image.
         Returns a list of BBox objects.
         """
-        try:
-            gray = cv2_module.cvtColor(image, cv2_module.COLOR_BGR2GRAY)
-            contours, _ = cv2_module.findContours(
-                gray, cv2_module.RETR_EXTERNAL, cv2_module.CHAIN_APPROX_SIMPLE
+        if cv2_module is None or np_module is None:
+            console.print(
+                "Error: OpenCV or NumPy not loaded for find_content_blocks.",
+                style="danger",
             )
+            return []
+        if image is None or image.size == 0:
+            console.print("Warning: Empty image passed to find_content_blocks.", style="warning")
+            return []
+
+        img_height, img_width = image.shape[:2]
+
+        try:
+            if len(image.shape) == 3:
+                gray = cv2_module.cvtColor(image, cv2_module.COLOR_BGR2GRAY)
+            else:
+                gray = image
+
+            thresh = cv2_module.adaptiveThreshold(
+                gray,
+                255,
+                cv2_module.ADAPTIVE_THRESH_MEAN_C,
+                cv2_module.THRESH_BINARY_INV,
+                11,
+                2,
+            )
+
+            kernel_gradient = cv2_module.getStructuringElement(cv2_module.MORPH_RECT, (3, 3))
+            gradient = cv2_module.morphologyEx(thresh, cv2_module.MORPH_GRADIENT, kernel_gradient)
+
+            kernel_close_h = cv2_module.getStructuringElement(cv2_module.MORPH_RECT, (HORIZONTAL_POOLING, 1))
+            closed_h = cv2_module.morphologyEx(gradient, cv2_module.MORPH_CLOSE, kernel_close_h)
+
+            kernel_close_v = cv2_module.getStructuringElement(cv2_module.MORPH_RECT, (1, MIN_TEXT_SIZE))
+            closed_v = cv2_module.morphologyEx(closed_h, cv2_module.MORPH_CLOSE, kernel_close_v)
+
+            kernel_dilate = cv2_module.getStructuringElement(cv2_module.MORPH_RECT, (5, 5))
+            dilated = cv2_module.dilate(closed_v, kernel_dilate, iterations=2)
+
+            contours, _ = cv2_module.findContours(
+                dilated, cv2_module.RETR_EXTERNAL, cv2_module.CHAIN_APPROX_SIMPLE
+            )
+
             bboxes = []
-            for cnt in contours:
-                x, y, w, h = cv2_module.boundingRect(cnt)
-                if w > MIN_TEXT_SIZE and h > MIN_TEXT_SIZE:
+            min_area = MIN_TEXT_SIZE * MIN_TEXT_SIZE
+            for contour in contours:
+                x, y, w, h = cv2_module.boundingRect(contour)
+                if w * h > min_area and w < img_width * 0.98 and h < img_height * 0.98:
                     bboxes.append(BBox(x, y, w, h))
+
+            bboxes.sort(key=lambda box: (box.y, box.x))
+
             return bboxes
+
+        except cv2_module.error as cv_error:
+            console.print(f"OpenCV error in find_content_blocks: {cv_error}", style="danger")
+            return []
         except Exception as e:
-            console.print(f"Error during content block detection: {e}", style="danger")
+            console.print(f"Error in find_content_blocks: {e}", style="danger")
+            console.print(traceback.format_exc(), style="dim")
             return []
 
     @staticmethod
     def extract_block_image(bbox, page_img, page_height, np_module, console):
         """Extract the block image from the page based on bbox."""
         if np_module is None:
-            if console:
-                console.print("Error: NumPy not loaded.", style="danger")
-            return None  # Indicate error
+            console.print("Error: NumPy not loaded for extract_block_image.", style="danger")
+            return None
         if page_img is None:
-            if console:
-                console.print(
-                    "Error: page_img not provided to extract_block_image.", style="danger"
-                )
+            console.print("Error: page_img is None in extract_block_image.", style="danger")
             return None
         if page_height is None:
-            if console:
-                console.print(
-                    "Warning: Height not provided to extract_block_image.", style="warning"
-                )
             page_height = page_img.shape[0]
 
-        if (
-            bbox.y < 0
-            or bbox.y_bottom > page_height
-            or bbox.x < 0
-            or bbox.x + bbox.width > page_img.shape[1]
-        ):
-            if console:
-                console.print(
-                    f"Warning: Invalid bbox coordinates for extraction - "
-                    f"y:{bbox.y}, y_bottom:{bbox.y_bottom}, page_h:{page_height}, "
-                    f"x:{bbox.x}, x_right:{bbox.x + bbox.width}, page_w:{page_img.shape[1]}",
-                    style="warning",
-                )
-            y_start = max(0, bbox.y)
-            y_end = min(page_height, bbox.y_bottom)
-            x_start = max(0, bbox.x)
-            x_end = min(page_img.shape[1], bbox.x + bbox.width)
-            if y_start >= y_end or x_start >= x_end:
-                return np_module.zeros((1, 1, 3), dtype=np_module.uint8)
-            return page_img[y_start:y_end, x_start:x_end]
-
         y_start = max(0, bbox.y)
-        y_end = min(page_height, bbox.y_bottom)
+        y_end = min(page_height, bbox.y2)
         x_start = max(0, bbox.x)
-        x_end = min(page_img.shape[1], bbox.x + bbox.width)
+        x_end = min(page_img.shape[1], bbox.x2)
 
         if y_start >= y_end or x_start >= x_end:
-            if console:
-                console.print(
-                    f"Warning: Calculated empty slice in extract_block_image.",
-                    style="warning",
-                )
-            return np_module.zeros((1, 1, 3), dtype=np_module.uint8)
+            return None
 
         return page_img[y_start:y_end, x_start:x_end]

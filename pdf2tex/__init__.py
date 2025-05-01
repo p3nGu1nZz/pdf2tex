@@ -105,15 +105,25 @@ def convert_pdfs_in_directory(directory_path, output_dir=".", data="data"):
     help="Directory for storing intermediate files (build artifacts)."
 )
 @click.option(
-    "--max-workers", type=int, default=1, show_default=True,
+    "--max-workers", "-w", type=int, default=1, show_default=True,  # Added -w shortcut
     help="Max workers for OCR/content processing (Phase 2)."
 )
 @click.option(
-    "--image-workers", type=int, default=4, show_default=True,
+    "--image-workers", "-i", type=int, default=4, show_default=True,  # Added -i shortcut
     help="Max workers for image extraction (Phase 1)."
 )
+@click.option(
+    "--batch-size", "-b", type=int, default=16, show_default=True,  # Added -b shortcut
+    help="Batch size for OCR operations (higher values use more VRAM but may be faster)."
+)
+@click.option(
+    "--quantize/--no-quantize",  # Use a flag with automatic boolean handling
+    default=True,  # Default is to quantize
+    show_default=True,
+    help="Use quantized models (--quantize, default) or full precision (--no-quantize)."
+)
 @click.version_option(version=__version__, message="PDF2Tex %(version)s")
-def main_cli(file, path, output, data, max_workers, image_workers):
+def main_cli(file, path, output, data, max_workers, image_workers, batch_size, quantize):  # Add new parameters
     """
     PDF2TEX - Convert PDF files to LaTeX format.
 
@@ -129,7 +139,8 @@ def main_cli(file, path, output, data, max_workers, image_workers):
     """
     # Load dependencies only if not asking for help/version
     if not any(arg in sys.argv for arg in ["--help", "-h", "--version"]):
-        _ensure_dependencies_loaded()
+        # Pass batch_size and quantize to dependency loader
+        _ensure_dependencies_loaded(batch_size=batch_size, quantize=quantize)
 
     if not file and not path:
         console.print("Error: Please provide either a --file or a --path option.", style="danger")
@@ -148,8 +159,8 @@ def main_cli(file, path, output, data, max_workers, image_workers):
 
     source_to_process = file if file else path
 
-    # Call the main conversion function with all arguments
-    convert(source_to_process, project_output_dir, data, max_workers, image_workers)
+    # Call the main conversion function with all arguments, including new ones
+    convert(source_to_process, project_output_dir, data, max_workers, image_workers, batch_size, quantize)
 
 
 if __name__ == "__main__":
